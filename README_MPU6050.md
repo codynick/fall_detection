@@ -97,6 +97,24 @@ y-axis scale only 3 times per second. Change these rates separately if needed:
 python3 mpu6050_logger.py --plot-hz 20 --scale-hz 2 -o movement_01.bin
 ```
 
+The active display window is five seconds (5000 ms) by default. Select acceleration
+time traces and X/Y/Z acceleration spectrograms with:
+
+```bash
+python3 mpu6050_logger.py --spectrogram accel --window 5 -o movement_01.bin
+```
+
+Select gyroscope time traces and X/Y/Z gyroscope spectrograms with:
+
+```bash
+python3 mpu6050_logger.py --spectrogram gyro --window 5 -o movement_01.bin
+```
+
+Use `--spectrogram off` to retain all six time-domain graphs. Spectrograms refresh
+twice per second by default; adjust this with `--spectrogram-hz`. They use
+256-sample Hann-windowed segments with 75% overlap and remove each segment's DC
+value before calculating its FFT.
+
 The defaults use ±2 g and ±250 degrees/s for maximum sensitivity. For impacts or
 falls that clip those limits, use wider ranges:
 

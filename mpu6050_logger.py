@@ -37,7 +37,7 @@ WHO_AM_I = 0x75
 
 PACKET_BYTES = 12  # accel XYZ followed by gyro XYZ; temperature is not in FIFO
 SAMPLE_RATE_HZ = 1000.0
-CODE_VERSION = "1.1.0"
+CODE_VERSION = "1.2.0"
 
 ACCEL_SCALE = {2: 16384.0, 4: 8192.0, 8: 4096.0, 16: 2048.0}
 GYRO_SCALE = {250: 131.0, 500: 65.5, 1000: 32.8, 2000: 16.4}
@@ -46,6 +46,22 @@ GYRO_SCALE = {250: 131.0, 500: 65.5, 1000: 32.8, 2000: 16.4}
 def signed16(high: int, low: int) -> int:
     value = (high << 8) | low
     return value - 65536 if value & 0x8000 else value
+
+
+def make_spectrogram(signal: np.ndarray, sample_rate: float,
+                     segment_samples: int = 256) -> tuple[np.ndarray, np.ndarray]:
+    """Return frequency bins and an amplitude spectrogram in decibels."""
+    segment_samples = min(segment_samples, len(signal))
+    if segment_samples < 16:
+        return np.empty(0), np.empty((0, 0))
+    hop = max(1, segment_samples // 4)  # 75% overlap
+    frames = np.lib.stride_tricks.sliding_window_view(signal, segment_samples)[::hop]
+    frames = frames - np.mean(frames, axis=1, keepdims=True)
+    window = np.hanning(segment_samples)
+    amplitude = np.abs(np.fft.rfft(frames * window, axis=1)) / max(1.0, window.sum())
+    decibels = 20.0 * np.log10(np.maximum(amplitude, np.finfo(float).tiny))
+    frequencies = np.fft.rfftfreq(segment_samples, d=1.0 / sample_rate)
+    return frequencies, decibels.T
 
 
 class MPU6050:
@@ -131,6 +147,10 @@ def parse_args() -> argparse.Namespace:
                         help="screen refresh rate; does not change logging rate")
     parser.add_argument("--scale-hz", type=float, default=3.0,
                         help="y-axis rescale rate (default: 3 times/s)")
+    parser.add_argument("--spectrogram", choices=("off", "accel", "gyro"),
+                        default="off", help="show accel or gyro spectrograms")
+    parser.add_argument("--spectrogram-hz", type=float, default=2.0,
+                        help="spectrogram refresh rate (default: 2 times/s)")
     parser.add_argument("--no-plot", action="store_true")
     return parser.parse_args()
 
@@ -265,27 +285,56 @@ def main() -> int:
             plt.ion()
             fig, axes = plt.subplots(2, 3, figsize=(14, 7), sharex=True)
             fig.canvas.manager.set_window_title(f"MPU-6050 Logger v{CODE_VERSION}")
-            channel_names = ("Accel X", "Accel Y", "Accel Z",
-                             "Gyro X", "Gyro Y", "Gyro Z")
-            channel_units = ("g", "g", "g",
-                             "degrees/s", "degrees/s", "degrees/s")
-            colors = ("tab:blue", "tab:orange", "tab:green",
-                      "tab:blue", "tab:orange", "tab:green")
             flat_axes = list(axes.flat)
-            lines = []
-            for axis, name, unit, color in zip(
-                    flat_axes, channel_names, channel_units, colors):
-                lines.append(axis.plot([], [], linewidth=1, color=color)[0])
-                axis.set_title(name)
-                axis.set_ylabel(unit)
-                axis.grid(True, alpha=0.3)
-            for axis in axes[1, :]:
-                axis.set_xlabel("Time (s)")
+            colors = ("tab:blue", "tab:orange", "tab:green")
+            spectrogram_images = []
+
+            if args.spectrogram == "off":
+                plotted_columns = (1, 2, 3, 4, 5, 6)
+                channel_names = ("Accel X", "Accel Y", "Accel Z",
+                                 "Gyro X", "Gyro Y", "Gyro Z")
+                channel_units = ("g", "g", "g",
+                                 "degrees/s", "degrees/s", "degrees/s")
+                lines = []
+                for index, (axis, name, unit) in enumerate(
+                        zip(flat_axes, channel_names, channel_units)):
+                    lines.append(axis.plot(
+                        [], [], linewidth=1, color=colors[index % 3]
+                    )[0])
+                    axis.set_title(name)
+                    axis.set_ylabel(unit)
+                    axis.grid(True, alpha=0.3)
+                time_axes = flat_axes
+                for axis in axes[1, :]:
+                    axis.set_xlabel("Time (s)")
+            else:
+                is_accel = args.spectrogram == "accel"
+                plotted_columns = (1, 2, 3) if is_accel else (4, 5, 6)
+                sensor_name = "Acceleration" if is_accel else "Gyroscope"
+                unit = "g" if is_accel else "degrees/s"
+                lines = []
+                time_axes = list(axes[0, :])
+                for dimension, axis, color in zip(("X", "Y", "Z"), time_axes, colors):
+                    lines.append(axis.plot([], [], linewidth=1, color=color)[0])
+                    axis.set_title(f"{sensor_name} {dimension} — time")
+                    axis.set_ylabel(unit)
+                    axis.grid(True, alpha=0.3)
+                for dimension, axis in zip(("X", "Y", "Z"), axes[1, :]):
+                    image = axis.imshow(
+                        np.zeros((129, 2)), origin="lower", aspect="auto",
+                        interpolation="nearest", cmap="viridis",
+                        extent=(0, args.window, 0, SAMPLE_RATE_HZ / 2)
+                    )
+                    spectrogram_images.append(image)
+                    axis.set_title(f"{sensor_name} {dimension} — spectrogram")
+                    axis.set_xlabel("Time (s)")
+                    axis.set_ylabel("Frequency (Hz)")
             fig.suptitle(
                 f"MPU-6050 Logger v{CODE_VERSION} — close window to stop"
             )
             fig.tight_layout(rect=(0, 0, 1, 0.95))
             last_scale_update = 0.0
+            last_spectrogram_update = 0.0
 
             while not stop.is_set() and plt.fignum_exists(fig.number):
                 with lock:
@@ -302,8 +351,7 @@ def main() -> int:
                         last_scale_update == 0.0
                         or now - last_scale_update >= 1.0 / max(0.1, args.scale_hz)
                     )
-                    for channel, (axis, line) in enumerate(
-                            zip(flat_axes, lines), start=1):
+                    for channel, axis, line in zip(plotted_columns, time_axes, lines):
                         line.set_data(shown[:, 0], shown[:, channel])
                         axis.set_xlim(left, right)
                         if update_scale:
@@ -313,6 +361,31 @@ def main() -> int:
                             axis.set_ylim(low - margin, high + margin)
                     if update_scale:
                         last_scale_update = now
+
+                    update_spectrogram = (
+                        args.spectrogram != "off"
+                        and (last_spectrogram_update == 0.0 or
+                             now - last_spectrogram_update >=
+                             1.0 / max(0.1, args.spectrogram_hz))
+                    )
+                    if update_spectrogram:
+                        for channel, axis, image in zip(
+                                plotted_columns, axes[1, :], spectrogram_images):
+                            frequencies, spectrum_db = make_spectrogram(
+                                data[:, channel], SAMPLE_RATE_HZ
+                            )
+                            if spectrum_db.size:
+                                frame_times = np.linspace(
+                                    data[0, 0], data[-1, 0], spectrum_db.shape[1]
+                                )
+                                image.set_data(spectrum_db)
+                                image.set_extent((frame_times[0], frame_times[-1],
+                                                  frequencies[0], frequencies[-1]))
+                                low = float(np.percentile(spectrum_db, 5))
+                                high = float(np.percentile(spectrum_db, 99.5))
+                                image.set_clim(low, max(low + 1.0, high))
+                                axis.set_xlim(left, right)
+                        last_spectrogram_update = now
                 fig.canvas.draw_idle()
                 plt.pause(max(0.001, 1.0 / args.plot_hz))
             stop.set()
