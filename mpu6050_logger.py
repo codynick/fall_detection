@@ -37,6 +37,7 @@ WHO_AM_I = 0x75
 
 PACKET_BYTES = 12  # accel XYZ followed by gyro XYZ; temperature is not in FIFO
 SAMPLE_RATE_HZ = 1000.0
+CODE_VERSION = "1.1.0"
 
 ACCEL_SCALE = {2: 16384.0, 4: 8192.0, 8: 4096.0, 16: 2048.0}
 GYRO_SCALE = {250: 131.0, 500: 65.5, 1000: 32.8, 2000: 16.4}
@@ -263,6 +264,7 @@ def main() -> int:
         else:
             plt.ion()
             fig, axes = plt.subplots(2, 3, figsize=(14, 7), sharex=True)
+            fig.canvas.manager.set_window_title(f"MPU-6050 Logger v{CODE_VERSION}")
             channel_names = ("Accel X", "Accel Y", "Accel Z",
                              "Gyro X", "Gyro Y", "Gyro Z")
             channel_units = ("g", "g", "g",
@@ -279,7 +281,9 @@ def main() -> int:
                 axis.grid(True, alpha=0.3)
             for axis in axes[1, :]:
                 axis.set_xlabel("Time (s)")
-            fig.suptitle("MPU-6050 live data — close window to stop")
+            fig.suptitle(
+                f"MPU-6050 Logger v{CODE_VERSION} — close window to stop"
+            )
             fig.tight_layout(rect=(0, 0, 1, 0.95))
             last_scale_update = 0.0
 
