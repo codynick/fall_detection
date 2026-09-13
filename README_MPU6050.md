@@ -110,10 +110,19 @@ Select gyroscope time traces and X/Y/Z gyroscope spectrograms with:
 python3 mpu6050_logger.py --spectrogram gyro --window 5 -o movement_01.bin
 ```
 
+To use all six panels for spectrograms, with acceleration X/Y/Z on the top row and
+gyroscope X/Y/Z on the bottom row:
+
+```bash
+python3 mpu6050_logger.py --spectrogram both --window 5 -o movement_01.bin
+```
+
 Use `--spectrogram off` to retain all six time-domain graphs. Spectrograms refresh
 twice per second by default; adjust this with `--spectrogram-hz`. They use
 256-sample Hann-windowed segments with 75% overlap and remove each segment's DC
-value before calculating its FFT.
+value before calculating its FFT. The figure heading also reports the delivered
+sampling frequency, recalculated from the number of FIFO samples received during
+the latest half-second interval.
 
 The defaults use ±2 g and ±250 degrees/s for maximum sensitivity. For impacts or
 falls that clip those limits, use wider ranges:

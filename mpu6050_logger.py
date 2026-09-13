@@ -37,7 +37,7 @@ WHO_AM_I = 0x75
 
 PACKET_BYTES = 12  # accel XYZ followed by gyro XYZ; temperature is not in FIFO
 SAMPLE_RATE_HZ = 1000.0
-CODE_VERSION = "1.2.0"
+CODE_VERSION = "1.3.0"
 
 ACCEL_SCALE = {2: 16384.0, 4: 8192.0, 8: 4096.0, 16: 2048.0}
 GYRO_SCALE = {250: 131.0, 500: 65.5, 1000: 32.8, 2000: 16.4}
@@ -147,8 +147,8 @@ def parse_args() -> argparse.Namespace:
                         help="screen refresh rate; does not change logging rate")
     parser.add_argument("--scale-hz", type=float, default=3.0,
                         help="y-axis rescale rate (default: 3 times/s)")
-    parser.add_argument("--spectrogram", choices=("off", "accel", "gyro"),
-                        default="off", help="show accel or gyro spectrograms")
+    parser.add_argument("--spectrogram", choices=("off", "accel", "gyro", "both"),
+                        default="off", help="show accel, gyro, or both spectrograms")
     parser.add_argument("--spectrogram-hz", type=float, default=2.0,
                         help="spectrogram refresh rate (default: 2 times/s)")
     parser.add_argument("--no-plot", action="store_true")
@@ -288,9 +288,11 @@ def main() -> int:
             flat_axes = list(axes.flat)
             colors = ("tab:blue", "tab:orange", "tab:green")
             spectrogram_images = []
+            spectrogram_axes = []
+            spectrogram_columns = ()
 
             if args.spectrogram == "off":
-                plotted_columns = (1, 2, 3, 4, 5, 6)
+                time_columns = (1, 2, 3, 4, 5, 6)
                 channel_names = ("Accel X", "Accel Y", "Accel Z",
                                  "Gyro X", "Gyro Y", "Gyro Z")
                 channel_units = ("g", "g", "g",
@@ -307,9 +309,10 @@ def main() -> int:
                 time_axes = flat_axes
                 for axis in axes[1, :]:
                     axis.set_xlabel("Time (s)")
-            else:
+            elif args.spectrogram in ("accel", "gyro"):
                 is_accel = args.spectrogram == "accel"
-                plotted_columns = (1, 2, 3) if is_accel else (4, 5, 6)
+                time_columns = (1, 2, 3) if is_accel else (4, 5, 6)
+                spectrogram_columns = time_columns
                 sensor_name = "Acceleration" if is_accel else "Gyroscope"
                 unit = "g" if is_accel else "degrees/s"
                 lines = []
@@ -319,7 +322,8 @@ def main() -> int:
                     axis.set_title(f"{sensor_name} {dimension} — time")
                     axis.set_ylabel(unit)
                     axis.grid(True, alpha=0.3)
-                for dimension, axis in zip(("X", "Y", "Z"), axes[1, :]):
+                spectrogram_axes = list(axes[1, :])
+                for dimension, axis in zip(("X", "Y", "Z"), spectrogram_axes):
                     image = axis.imshow(
                         np.zeros((129, 2)), origin="lower", aspect="auto",
                         interpolation="nearest", cmap="viridis",
@@ -329,12 +333,32 @@ def main() -> int:
                     axis.set_title(f"{sensor_name} {dimension} — spectrogram")
                     axis.set_xlabel("Time (s)")
                     axis.set_ylabel("Frequency (Hz)")
-            fig.suptitle(
-                f"MPU-6050 Logger v{CODE_VERSION} — close window to stop"
+            else:
+                time_columns = ()
+                time_axes = []
+                lines = []
+                spectrogram_columns = (1, 2, 3, 4, 5, 6)
+                spectrogram_axes = flat_axes
+                names = ("Accel X", "Accel Y", "Accel Z",
+                         "Gyro X", "Gyro Y", "Gyro Z")
+                for name, axis in zip(names, spectrogram_axes):
+                    image = axis.imshow(
+                        np.zeros((129, 2)), origin="lower", aspect="auto",
+                        interpolation="nearest", cmap="viridis",
+                        extent=(0, args.window, 0, SAMPLE_RATE_HZ / 2)
+                    )
+                    spectrogram_images.append(image)
+                    axis.set_title(f"{name} — spectrogram")
+                    axis.set_xlabel("Time (s)")
+                    axis.set_ylabel("Frequency (Hz)")
+            figure_title = fig.suptitle(
+                f"MPU-6050 Logger v{CODE_VERSION} — sampling: measuring..."
             )
             fig.tight_layout(rect=(0, 0, 1, 0.95))
             last_scale_update = 0.0
             last_spectrogram_update = 0.0
+            last_rate_update = time.perf_counter()
+            last_rate_samples = stats["samples"]
 
             while not stop.is_set() and plt.fignum_exists(fig.number):
                 with lock:
@@ -351,7 +375,7 @@ def main() -> int:
                         last_scale_update == 0.0
                         or now - last_scale_update >= 1.0 / max(0.1, args.scale_hz)
                     )
-                    for channel, axis, line in zip(plotted_columns, time_axes, lines):
+                    for channel, axis, line in zip(time_columns, time_axes, lines):
                         line.set_data(shown[:, 0], shown[:, channel])
                         axis.set_xlim(left, right)
                         if update_scale:
@@ -370,7 +394,8 @@ def main() -> int:
                     )
                     if update_spectrogram:
                         for channel, axis, image in zip(
-                                plotted_columns, axes[1, :], spectrogram_images):
+                                spectrogram_columns, spectrogram_axes,
+                                spectrogram_images):
                             frequencies, spectrum_db = make_spectrogram(
                                 data[:, channel], SAMPLE_RATE_HZ
                             )
@@ -386,6 +411,19 @@ def main() -> int:
                                 image.set_clim(low, max(low + 1.0, high))
                                 axis.set_xlim(left, right)
                         last_spectrogram_update = now
+
+                    rate_elapsed = now - last_rate_update
+                    if rate_elapsed >= 0.5:
+                        current_samples = stats["samples"]
+                        instantaneous_rate = (
+                            current_samples - last_rate_samples
+                        ) / rate_elapsed
+                        figure_title.set_text(
+                            f"MPU-6050 Logger v{CODE_VERSION} — "
+                            f"sampling: {instantaneous_rate:.1f} Hz"
+                        )
+                        last_rate_update = now
+                        last_rate_samples = current_samples
                 fig.canvas.draw_idle()
                 plt.pause(max(0.001, 1.0 / args.plot_hz))
             stop.set()
