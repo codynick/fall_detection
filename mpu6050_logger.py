@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import configparser
 import json
 import signal
 import struct
@@ -37,7 +38,10 @@ WHO_AM_I = 0x75
 
 PACKET_BYTES = 12  # accel XYZ followed by gyro XYZ; temperature is not in FIFO
 SAMPLE_RATE_HZ = 1000.0
-CODE_VERSION = "1.3.0"
+CODE_VERSION = "1.4.0"
+
+ACCEL_BANDWIDTH_TO_DLPF = {260: 0, 184: 1, 94: 2, 44: 3}
+GYRO_BANDWIDTH_FOR_ACCEL_BW = {260: 256, 184: 188, 94: 98, 44: 42}
 
 ACCEL_SCALE = {2: 16384.0, 4: 8192.0, 8: 4096.0, 16: 2048.0}
 GYRO_SCALE = {250: 131.0, 500: 65.5, 1000: 32.8, 2000: 16.4}
@@ -78,7 +82,7 @@ class MPU6050:
     def write_register(self, register: int, value: int) -> None:
         self.bus.write_byte_data(self.address, register, value)
 
-    def configure(self, accel_range: int, gyro_range: int) -> None:
+    def configure(self, accel_range: int, gyro_range: int, bandwidth: int) -> None:
         identity = self.read_register(WHO_AM_I)
         if identity not in (0x68, 0x69):
             raise RuntimeError(
@@ -92,11 +96,13 @@ class MPU6050:
         self.write_register(PWR_MGMT_2, 0x00)  # enable every axis
         time.sleep(0.05)
 
-        # DLPF_CFG=0: 260 Hz accel BW, 256 Hz gyro BW. Internal gyro rate is
-        # 8 kHz; divider 7 gives a synchronized 1 kHz FIFO rate. The accel
-        # itself only produces unique data at up to 1 kHz.
-        self.write_register(CONFIG, 0x00)
-        self.write_register(SMPLRT_DIV, 7)
+        # DLPF_CFG selects the accelerometer bandwidth. With DLPF_CFG=0 the
+        # internal gyro rate is 8 kHz, so divider 7 produces a synchronized
+        # 1 kHz FIFO stream. At the other supported bandwidths the internal
+        # rate is already 1 kHz and divider 0 preserves that sample rate.
+        dlpf = ACCEL_BANDWIDTH_TO_DLPF[bandwidth]
+        self.write_register(CONFIG, dlpf)
+        self.write_register(SMPLRT_DIV, 7 if dlpf == 0 else 0)
         accel_bits = {2: 0, 4: 1, 8: 2, 16: 3}[accel_range]
         gyro_bits = {250: 0, 500: 1, 1000: 2, 2000: 3}[gyro_range]
         self.write_register(GYRO_CONFIG, gyro_bits << 3)
@@ -129,8 +135,50 @@ class MPU6050:
         return list(data)
 
 
+def load_config_defaults(path: Path) -> dict[str, object]:
+    """Load command defaults from an explicitly selected INI file."""
+    config = configparser.ConfigParser()
+    if not path.is_file():
+        raise ValueError(f"configuration file not found: {path}")
+    config.read(path, encoding="utf-8")
+    if "mpu6050" not in config:
+        raise ValueError("configuration file needs an [mpu6050] section")
+
+    section = config["mpu6050"]
+    converters = {
+        "output": Path,
+        "no_log": section.getboolean,
+        "bus": int,
+        "address": lambda value: int(value, 0),
+        "accel_range": int,
+        "gyro_range": int,
+        "bandwidth": int,
+        "window": float,
+        "plot_hz": float,
+        "scale_hz": float,
+        "spectrogram": str,
+        "spectrogram_hz": float,
+        "no_plot": section.getboolean,
+    }
+    unknown = set(section) - set(converters)
+    if unknown:
+        raise ValueError(f"unknown configuration option(s): {', '.join(sorted(unknown))}")
+
+    defaults: dict[str, object] = {}
+    for key, value in section.items():
+        converter = converters[key]
+        defaults[key] = section.getboolean(key) if key in ("no_log", "no_plot") else converter(value)
+    return defaults
+
+
 def parse_args() -> argparse.Namespace:
+    config_parser = argparse.ArgumentParser(add_help=False)
+    config_parser.add_argument("--config", type=Path)
+    config_args, _ = config_parser.parse_known_args()
+
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", type=Path,
+                        help="load defaults from this INI file; CLI options override it")
     parser.add_argument("-o", "--output", type=Path, default=None)
     parser.add_argument("--no-log", action="store_true",
                         help="run without creating binary or metadata files")
@@ -141,6 +189,8 @@ def parse_args() -> argparse.Namespace:
                         help="accelerometer full scale in g (default: 2, most sensitive)")
     parser.add_argument("--gyro-range", type=int, choices=(250, 500, 1000, 2000), default=250,
                         help="gyroscope full scale in degrees/s (default: 250)")
+    parser.add_argument("--bandwidth", type=int, choices=(44, 94, 184, 260), default=260,
+                        help="accelerometer DLPF bandwidth in Hz (default: 260)")
     parser.add_argument("--window", type=float, default=5.0,
                         help="seconds visible in the plot")
     parser.add_argument("--plot-hz", type=float, default=20.0,
@@ -152,7 +202,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--spectrogram-hz", type=float, default=2.0,
                         help="spectrogram refresh rate (default: 2 times/s)")
     parser.add_argument("--no-plot", action="store_true")
-    return parser.parse_args()
+    if config_args.config is not None:
+        try:
+            parser.set_defaults(**load_config_defaults(config_args.config))
+        except (ValueError, configparser.Error) as exc:
+            parser.error(str(exc))
+    args = parser.parse_args()
+    if args.accel_range not in ACCEL_SCALE:
+        parser.error("accel_range must be one of: 2, 4, 8, 16")
+    if args.gyro_range not in GYRO_SCALE:
+        parser.error("gyro_range must be one of: 250, 500, 1000, 2000")
+    if args.bandwidth not in ACCEL_BANDWIDTH_TO_DLPF:
+        parser.error("bandwidth must be one of: 44, 94, 184, 260")
+    if args.spectrogram not in ("off", "accel", "gyro", "both"):
+        parser.error("spectrogram must be one of: off, accel, gyro, both")
+    return args
 
 
 def main() -> int:
@@ -177,7 +241,7 @@ def main() -> int:
         sensor: MPU6050 | None = None
         try:
             sensor = MPU6050(args.bus, args.address)
-            sensor.configure(args.accel_range, args.gyro_range)
+            sensor.configure(args.accel_range, args.gyro_range, args.bandwidth)
             accel_scale = ACCEL_SCALE[args.accel_range]
             gyro_scale = GYRO_SCALE[args.gyro_range]
             start_mono = time.perf_counter()
@@ -199,6 +263,8 @@ def main() -> int:
                         "accel_lsb_per_g": accel_scale,
                         "gyro_range_dps": args.gyro_range,
                         "gyro_lsb_per_dps": gyro_scale,
+                        "accel_bandwidth_hz": args.bandwidth,
+                        "gyro_bandwidth_hz": GYRO_BANDWIDTH_FOR_ACCEL_BW[args.bandwidth],
                     }
                     metadata_path = output.with_suffix(output.suffix + ".json")
                     metadata_path.write_text(
@@ -290,6 +356,7 @@ def main() -> int:
             spectrogram_images = []
             spectrogram_axes = []
             spectrogram_columns = ()
+            spectrogram_bandwidths = ()
 
             if args.spectrogram == "off":
                 time_columns = (1, 2, 3, 4, 5, 6)
@@ -313,6 +380,11 @@ def main() -> int:
                 is_accel = args.spectrogram == "accel"
                 time_columns = (1, 2, 3) if is_accel else (4, 5, 6)
                 spectrogram_columns = time_columns
+                spectrum_bandwidth = (
+                    args.bandwidth if is_accel
+                    else GYRO_BANDWIDTH_FOR_ACCEL_BW[args.bandwidth]
+                )
+                spectrogram_bandwidths = (spectrum_bandwidth,) * 3
                 sensor_name = "Acceleration" if is_accel else "Gyroscope"
                 unit = "g" if is_accel else "degrees/s"
                 lines = []
@@ -323,11 +395,13 @@ def main() -> int:
                     axis.set_ylabel(unit)
                     axis.grid(True, alpha=0.3)
                 spectrogram_axes = list(axes[1, :])
-                for dimension, axis in zip(("X", "Y", "Z"), spectrogram_axes):
+                for dimension, axis, bandwidth in zip(
+                        ("X", "Y", "Z"), spectrogram_axes,
+                        spectrogram_bandwidths):
                     image = axis.imshow(
                         np.zeros((129, 2)), origin="lower", aspect="auto",
                         interpolation="nearest", cmap="viridis",
-                        extent=(0, args.window, 0, SAMPLE_RATE_HZ / 2)
+                        extent=(0, args.window, 0, bandwidth)
                     )
                     spectrogram_images.append(image)
                     axis.set_title(f"{sensor_name} {dimension} — spectrogram")
@@ -338,14 +412,19 @@ def main() -> int:
                 time_axes = []
                 lines = []
                 spectrogram_columns = (1, 2, 3, 4, 5, 6)
+                spectrogram_bandwidths = (
+                    (args.bandwidth,) * 3
+                    + (GYRO_BANDWIDTH_FOR_ACCEL_BW[args.bandwidth],) * 3
+                )
                 spectrogram_axes = flat_axes
                 names = ("Accel X", "Accel Y", "Accel Z",
                          "Gyro X", "Gyro Y", "Gyro Z")
-                for name, axis in zip(names, spectrogram_axes):
+                for name, axis, bandwidth in zip(
+                        names, spectrogram_axes, spectrogram_bandwidths):
                     image = axis.imshow(
                         np.zeros((129, 2)), origin="lower", aspect="auto",
                         interpolation="nearest", cmap="viridis",
-                        extent=(0, args.window, 0, SAMPLE_RATE_HZ / 2)
+                        extent=(0, args.window, 0, bandwidth)
                     )
                     spectrogram_images.append(image)
                     axis.set_title(f"{name} — spectrogram")
@@ -393,13 +472,16 @@ def main() -> int:
                              1.0 / max(0.1, args.spectrogram_hz))
                     )
                     if update_spectrogram:
-                        for channel, axis, image in zip(
+                        for channel, axis, image, bandwidth in zip(
                                 spectrogram_columns, spectrogram_axes,
-                                spectrogram_images):
+                                spectrogram_images, spectrogram_bandwidths):
                             frequencies, spectrum_db = make_spectrogram(
                                 data[:, channel], SAMPLE_RATE_HZ
                             )
                             if spectrum_db.size:
+                                visible = frequencies <= bandwidth
+                                frequencies = frequencies[visible]
+                                spectrum_db = spectrum_db[visible, :]
                                 frame_times = np.linspace(
                                     data[0, 0], data[-1, 0], spectrum_db.shape[1]
                                 )

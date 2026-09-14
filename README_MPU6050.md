@@ -124,6 +124,37 @@ value before calculating its FFT. The figure heading also reports the delivered
 sampling frequency, recalculated from the number of FIFO samples received during
 the latest half-second interval.
 
+The accelerometer low-pass bandwidth can be selected without changing the 1 kHz
+logging rate:
+
+```bash
+python3 mpu6050_logger.py --bandwidth 44 --spectrogram accel -o movement_01.bin
+```
+
+Valid accelerometer bandwidths are 44, 94, 184, and 260 Hz. The corresponding
+gyroscope bandwidths imposed by the same MPU-6050 DLPF setting are approximately
+42, 98, 188, and 256 Hz. Each spectrogram stops at its channel's selected physical
+bandwidth instead of displaying the unused region up to the 500 Hz Nyquist limit.
+
+## Optional configuration file
+
+All commonly changed options are included in `mpu6050.cfg`. The program ignores
+that file unless it is explicitly selected:
+
+```bash
+python3 mpu6050_logger.py --config mpu6050.cfg
+```
+
+Edit the values in its `[mpu6050]` section. A command-line option supplied in the
+same invocation overrides the file for that run:
+
+```bash
+python3 mpu6050_logger.py --config mpu6050.cfg --bandwidth 94
+```
+
+Running `python3 mpu6050_logger.py` without `--config` continues to use the built-in
+defaults and does not read the configuration file.
+
 The defaults use ±2 g and ±250 degrees/s for maximum sensitivity. For impacts or
 falls that clip those limits, use wider ranges:
 
