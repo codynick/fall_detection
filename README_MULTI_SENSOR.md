@@ -2,7 +2,7 @@
 
 `multi_motion_logger.py` acquires the MPU-6050, LSM6DSO, ADXL355 and SCL3300
 simultaneously. Each sensor has its own bus/interface. The program logs compact raw
-binary data while displaying two or three independently selectable XYZ views. This
+binary data while displaying two to four independently selectable XYZ views. This
 is a prototype driver and must be verified on the actual boards before relying on
 its measurements.
 
@@ -177,7 +177,7 @@ silently ignored.
 
 ## Live display controls
 
-- `A`, `B`, or `C`: select a display row (`C` is available in three-row mode).
+- `A`, `B`, `C`, or `D`: select a display row when that row is enabled.
 - `1`: MPU-6050 acceleration.
 - `2`: MPU-6050 gyroscope.
 - `3`: LSM6DSO acceleration.
@@ -192,10 +192,12 @@ silently ignored.
 Each row has independent source and display mode. Switching views affects only
 drawing; every enabled sensor continues to be acquired and logged.
 
-Set `display_rows = 2` or `display_rows = 3` in the `[logger]` section of the
-configuration file. The default is three. Three-row mode adds row C, whose initial
-selections are set by `section_c_source` and `section_c_view`. Invalid row counts
-stop with a clear error.
+Set `display_rows` to `2`, `3`, or `4` in the `[logger]` section of the
+configuration file. The default is three. Additional rows use
+`section_c_source`/`section_c_view` and `section_d_source`/`section_d_view` for
+their initial selections. Invalid row counts stop with a clear error. Four-row mode
+caps the figure height at 10 inches so it fits a typical 1080p display; maximize the
+window if additional plotting space is available.
 
 The right side of the graph window also has independent radio-button panels for
 every displayed row. Each panel selects a source and either `Time` or `Frequency`. The same

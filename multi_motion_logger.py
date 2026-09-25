@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Four-sensor Raspberry Pi motion logger with a two- or three-row display.
+"""Four-sensor Raspberry Pi motion logger with a two- to four-row display.
 
-Keys: A/B/C selects a row, 1-7 selects its source, F shows a spectrogram,
+Keys: A/B/C/D selects a row, 1-7 selects its source, F shows a spectrogram,
 T shows time-domain data, and Q quits. Run with --config to load the INI file.
 """
 
@@ -26,7 +26,7 @@ import spidev
 from smbus2 import SMBus
 
 
-CODE_VERSION = "2.2.1"
+CODE_VERSION = "2.3.0"
 SOURCE_NAMES = {
     1: "mpu_accel",
     2: "mpu_gyro",
@@ -384,7 +384,9 @@ def load_settings(path: Path | None) -> configparser.ConfigParser:
                    "section_a_source": "mpu_accel", "section_a_view": "time",
                    "section_b_source": "mpu_gyro", "section_b_view": "time",
                    "section_c_source": "adxl355_accel",
-                   "section_c_view": "time"},
+                   "section_c_view": "time",
+                   "section_d_source": "scl3300_accel",
+                   "section_d_view": "time"},
         "mpu6050": {"enabled": "true", "bus": "1", "address": "0x68",
                     "accel_range": "2", "gyro_range": "250"},
         "lsm6dso": {"enabled": "true", "bus": "2", "address": "0x6B",
@@ -417,9 +419,9 @@ def main() -> int:
     sample_rate = logger.getfloat("sample_rate_hz")
     window_seconds = logger.getfloat("window_seconds")
     display_rows = logger.getint("display_rows", fallback=3)
-    if display_rows not in (2, 3):
-        raise ValueError("display_rows must be 2 or 3")
-    row_names = tuple("abc"[:display_rows])
+    if display_rows not in (2, 3, 4):
+        raise ValueError("display_rows must be 2, 3, or 4")
+    row_names = tuple("abcd"[:display_rows])
     log_enabled = get_bool(logger, "log_enabled", True) and not args.no_log
     output_root = Path(logger.get("output_directory", "recordings"))
     session_dir = output_root / time.strftime("motion_%Y%m%d_%H%M%S")
@@ -520,7 +522,7 @@ def main() -> int:
     start_event.set()
 
     default_sources = {"a": "mpu_accel", "b": "mpu_gyro",
-                       "c": "adxl355_accel"}
+                       "c": "adxl355_accel", "d": "scl3300_accel"}
     view = {
         row_name: {
             "source": logger.get(f"section_{row_name}_source",
@@ -551,7 +553,8 @@ def main() -> int:
             # subset of a peak on successive redraws.
             plt.rcParams["path.simplify"] = False
             fig, axes = plt.subplots(
-                display_rows, 3, figsize=(14, 3.2 * display_rows + 0.6),
+                display_rows, 3,
+                figsize=(14, min(10.0, 3.2 * display_rows + 0.6)),
                 sharex="row"
             )
             fig.canvas.manager.set_window_title(f"Multi Motion Logger v{CODE_VERSION}")
