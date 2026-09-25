@@ -15,7 +15,7 @@ import signal
 import struct
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import BinaryIO, Callable
 
@@ -26,7 +26,7 @@ import spidev
 from smbus2 import SMBus
 
 
-CODE_VERSION = "2.3.0"
+CODE_VERSION = "3.0.0"
 SOURCE_NAMES = {
     1: "mpu_accel",
     2: "mpu_gyro",
@@ -50,6 +50,18 @@ SOURCE_UNITS = {
     "lsm_accel": "g", "lsm_gyro": "degrees/s",
     "adxl355_accel": "g", "scl3300_accel": "g",
     "scl3300_angle": "degrees",
+}
+SOURCE_BINARY_FORMATS = {
+    "mpu_accel": "<3h", "mpu_gyro": "<3h",
+    "lsm_accel": "<3h", "lsm_gyro": "<3h",
+    "adxl355_accel": "<3i", "scl3300_accel": "<3h",
+    "scl3300_angle": "<3h",
+}
+SOURCE_DEVICES = {
+    "mpu_accel": "mpu6050", "mpu_gyro": "mpu6050",
+    "lsm_accel": "lsm6dso", "lsm_gyro": "lsm6dso",
+    "adxl355_accel": "adxl355", "scl3300_accel": "scl3300",
+    "scl3300_angle": "scl3300",
 }
 
 
@@ -104,14 +116,15 @@ class MPU6050:
         self.bus.write_byte_data(address, 0x1C,
                                  {2: 0, 4: 1, 8: 2, 16: 3}[accel_range] << 3)
 
-    def read(self) -> tuple[dict[str, tuple[float, float, float]], bytes]:
+    def read(self) -> tuple[dict[str, tuple[float, float, float]],
+                            dict[str, tuple[int, int, int]]]:
         data = self.bus.read_i2c_block_data(self.address, 0x3B, 14)
         raw_a = tuple(signed16(data[i + 1], data[i]) for i in (0, 2, 4))
         raw_g = tuple(signed16(data[i + 1], data[i]) for i in (8, 10, 12))
         return {
             "mpu_accel": tuple(v / self.accel_scale for v in raw_a),
             "mpu_gyro": tuple(v / self.gyro_scale for v in raw_g),
-        }, struct.pack(self.binary_format, *(raw_a + raw_g))
+        }, {"mpu_accel": raw_a, "mpu_gyro": raw_g}
 
     def close(self) -> None:
         self.bus.close()
@@ -152,14 +165,15 @@ class LSM6DSO:
             gyro_bits = {250: 0, 500: 1, 1000: 2, 2000: 3}[gyro_range] << 2
         self.bus.write_byte_data(address, 0x11, 0x80 | gyro_bits)
 
-    def read(self) -> tuple[dict[str, tuple[float, float, float]], bytes]:
+    def read(self) -> tuple[dict[str, tuple[float, float, float]],
+                            dict[str, tuple[int, int, int]]]:
         data = self.bus.read_i2c_block_data(self.address, 0x22, 12)
         raw_g = tuple(signed16(data[i], data[i + 1]) for i in (0, 2, 4))
         raw_a = tuple(signed16(data[i], data[i + 1]) for i in (6, 8, 10))
         return {
             "lsm_accel": tuple(v * self.accel_scale for v in raw_a),
             "lsm_gyro": tuple(v * self.gyro_scale for v in raw_g),
-        }, struct.pack(self.binary_format, *(raw_a + raw_g))
+        }, {"lsm_accel": raw_a, "lsm_gyro": raw_g}
 
     def close(self) -> None:
         self.bus.close()
@@ -209,11 +223,12 @@ class ADXL355:
     def _write(self, register: int, value: int) -> None:
         self.spi.xfer2([register << 1, value & 0xFF])
 
-    def read(self) -> tuple[dict[str, tuple[float, float, float]], bytes]:
+    def read(self) -> tuple[dict[str, tuple[float, float, float]],
+                            dict[str, tuple[int, int, int]]]:
         data = self._read_many(0x08, 9)
         raw = tuple(signed20(*data[i:i + 3]) for i in (0, 3, 6))
         return {"adxl355_accel": tuple(v / self.scale for v in raw)}, \
-            struct.pack(self.binary_format, *raw)
+            {"adxl355_accel": raw}
 
     def close(self) -> None:
         self._write(0x2D, 0x01)
@@ -289,7 +304,8 @@ class SCL3300:
         value = (response >> 8) & 0xFFFF
         return value - 65536 if value & 0x8000 else value
 
-    def read(self) -> tuple[dict[str, tuple[float, float, float]], bytes]:
+    def read(self) -> tuple[dict[str, tuple[float, float, float]],
+                            dict[str, tuple[int, int, int]]]:
         self._transfer(self.COMMANDS["acc_x"])
         ax = self._data(self._transfer(self.COMMANDS["acc_y"]))
         ay = self._data(self._transfer(self.COMMANDS["acc_z"]))
@@ -301,7 +317,7 @@ class SCL3300:
         return {
             "scl3300_accel": tuple(v / self.accel_scale for v in raw_a),
             "scl3300_angle": tuple(v / self.angle_scale for v in raw_angle),
-        }, struct.pack(self.binary_format, *(raw_a + raw_angle))
+        }, {"scl3300_accel": raw_a, "scl3300_angle": raw_angle}
 
     def close(self) -> None:
         self.spi.close()
@@ -320,13 +336,16 @@ class WorkerStats:
     samples: int = 0
     errors: int = 0
     missed_deadlines: int = 0
+    logged_samples: dict[str, int] = field(default_factory=dict)
 
 
 class AcquisitionWorker(threading.Thread):
     def __init__(self, device: object, sample_rate: float, start_time: float,
                  start_event: threading.Event, stop_event: threading.Event,
                  buffers: dict[str, collections.deque], lock: threading.Lock,
-                 log_stream: BinaryIO | None):
+                 log_streams: dict[str, BinaryIO],
+                 timestamp_streams: dict[str, BinaryIO],
+                 logged_sources: set[str]):
         super().__init__(name=f"acquire-{device.name}", daemon=True)
         self.device = device
         self.period = 1.0 / sample_rate
@@ -335,8 +354,10 @@ class AcquisitionWorker(threading.Thread):
         self.stop_event = stop_event
         self.buffers = buffers
         self.lock = lock
-        self.log_stream = log_stream
-        self.stats = WorkerStats()
+        self.log_streams = log_streams
+        self.timestamp_streams = timestamp_streams
+        self.logged_sources = logged_sources
+        self.stats = WorkerStats(logged_samples={source: 0 for source in device.sources})
         self.last_error = ""
 
     def run(self) -> None:
@@ -345,13 +366,23 @@ class AcquisitionWorker(threading.Thread):
         try:
             while not self.stop_event.is_set():
                 try:
-                    values, binary = self.device.read()
+                    values, raw_values = self.device.read()
                     timestamp = time.perf_counter() - self.start_time
                     with self.lock:
                         for source, xyz in values.items():
                             self.buffers[source].append((timestamp, *xyz))
-                    if self.log_stream is not None:
-                        self.log_stream.write(binary)
+                        sources_to_log = tuple(
+                            source for source in values
+                            if source in self.logged_sources
+                        )
+                    for source in sources_to_log:
+                        self.log_streams[source].write(struct.pack(
+                            SOURCE_BINARY_FORMATS[source], *raw_values[source]
+                        ))
+                        self.timestamp_streams[source].write(struct.pack(
+                            "<q", int(round(timestamp * 1_000_000_000.0))
+                        ))
+                        self.stats.logged_samples[source] += 1
                     self.stats.samples += 1
                 except OSError as exc:
                     self.stats.errors += 1
@@ -365,8 +396,10 @@ class AcquisitionWorker(threading.Thread):
                     self.stats.missed_deadlines += max(1, int(-delay / self.period))
                     deadline = time.perf_counter()
         finally:
-            if self.log_stream is not None:
-                self.log_stream.flush()
+            for source in self.device.sources:
+                if source in self.log_streams:
+                    self.log_streams[source].flush()
+                    self.timestamp_streams[source].flush()
 
 
 def get_bool(section: configparser.SectionProxy, key: str, default: bool) -> bool:
@@ -380,7 +413,7 @@ def load_settings(path: Path | None) -> configparser.ConfigParser:
                    "plot_hz": "20", "scale_hz": "3", "spectrogram_hz": "2",
                    "fft_samples": "256", "fft_overlap_percent": "75",
                    "log_enabled": "true", "output_directory": "recordings",
-                   "display_rows": "3",
+                   "log_scope": "displayed", "display_rows": "4",
                    "section_a_source": "mpu_accel", "section_a_view": "time",
                    "section_b_source": "mpu_gyro", "section_b_view": "time",
                    "section_c_source": "adxl355_accel",
@@ -418,11 +451,14 @@ def main() -> int:
     logger = config["logger"]
     sample_rate = logger.getfloat("sample_rate_hz")
     window_seconds = logger.getfloat("window_seconds")
-    display_rows = logger.getint("display_rows", fallback=3)
+    display_rows = logger.getint("display_rows", fallback=4)
     if display_rows not in (2, 3, 4):
         raise ValueError("display_rows must be 2, 3, or 4")
     row_names = tuple("abcd"[:display_rows])
     log_enabled = get_bool(logger, "log_enabled", True) and not args.no_log
+    log_scope = logger.get("log_scope", "displayed").strip().lower()
+    if log_scope not in ("displayed", "all"):
+        raise ValueError("log_scope must be displayed or all")
     output_root = Path(logger.get("output_directory", "recordings"))
     session_dir = output_root / time.strftime("motion_%Y%m%d_%H%M%S")
     if log_enabled:
@@ -430,6 +466,7 @@ def main() -> int:
 
     devices: list[object] = []
     streams: dict[str, BinaryIO] = {}
+    timestamp_streams: dict[str, BinaryIO] = {}
     require_all = get_bool(logger, "require_all_sensors", False)
 
     def add_sensor(label: str, factory: Callable[[], object]) -> None:
@@ -490,22 +527,47 @@ def main() -> int:
     if not available_sources:
         raise RuntimeError("No sensors are enabled")
 
+    default_sources = {"a": "mpu_accel", "b": "mpu_gyro",
+                       "c": "adxl355_accel", "d": "scl3300_accel"}
+    view = {
+        row_name: {
+            "source": logger.get(f"section_{row_name}_source",
+                                 default_sources[row_name]).strip().lower(),
+            "mode": logger.get(f"section_{row_name}_view", "time").strip().lower(),
+        }
+        for row_name in row_names
+    }
+    for row in view.values():
+        if row["source"] != "none" and row["source"] not in available_sources:
+            row["source"] = sorted(available_sources)[0]
+        if row["mode"] not in ("time", "spectrogram"):
+            row["mode"] = "time"
+
     max_points = max(2000, int(window_seconds * sample_rate * 1.25))
     buffers = {name: collections.deque(maxlen=max_points) for name in SOURCE_LABELS}
     lock = threading.Lock()
     stop_event = threading.Event()
     start_event = threading.Event()
     start_time = time.perf_counter()
+    logged_sources = (
+        (set(available_sources) if log_scope == "all" else
+         {row["source"] for row in view.values() if row["source"] != "none"})
+        if log_enabled else set()
+    )
 
     if log_enabled:
-        for device in devices:
-            streams[device.name] = (session_dir / f"{device.name}.bin").open(
+        for source in sorted(available_sources):
+            streams[source] = (session_dir / f"{source}.bin").open(
                 "wb", buffering=1024 * 1024
             )
+            timestamp_streams[source] = (
+                session_dir / f"{source}_time.bin"
+            ).open("wb", buffering=1024 * 1024)
 
     workers = [
         AcquisitionWorker(device, sample_rate, start_time, start_event, stop_event,
-                          buffers, lock, streams.get(device.name))
+                          buffers, lock, streams, timestamp_streams,
+                          logged_sources)
         for device in devices
     ]
 
@@ -520,22 +582,6 @@ def main() -> int:
     for worker in workers:
         worker.start_time = start_time
     start_event.set()
-
-    default_sources = {"a": "mpu_accel", "b": "mpu_gyro",
-                       "c": "adxl355_accel", "d": "scl3300_accel"}
-    view = {
-        row_name: {
-            "source": logger.get(f"section_{row_name}_source",
-                                 default_sources[row_name]),
-            "mode": logger.get(f"section_{row_name}_view", "time"),
-        }
-        for row_name in row_names
-    }
-    for row in view.values():
-        if row["source"] not in available_sources:
-            row["source"] = sorted(available_sources)[0]
-        if row["mode"] not in ("time", "spectrogram"):
-            row["mode"] = "time"
 
     try:
         if args.no_plot:
@@ -585,7 +631,12 @@ def main() -> int:
                 artists[row_name] = []
                 for dimension, color, axis in zip(dimensions, colors, axes[row_index, :]):
                     axis.clear()
+                    axis.set_axis_on()
                     prefix = "*" if active_row[0] == row_name else ""
+                    if source == "none":
+                        axis.set_title(f"{prefix}{row_name.upper()}: None {dimension}")
+                        axis.set_axis_off()
+                        continue
                     axis.set_title(f"{prefix}{row_name.upper()}: {SOURCE_LABELS[source]} {dimension}")
                     axis.set_xlabel("Time (s)")
                     if mode == "time":
@@ -609,9 +660,9 @@ def main() -> int:
                     active_row[0] = key
                     setup_row(old)
                     setup_row(key)
-                elif key in tuple(str(number) for number in SOURCE_NAMES):
-                    source = SOURCE_NAMES[int(key)]
-                    if source in available_sources:
+                elif key == "0" or key in tuple(str(number) for number in SOURCE_NAMES):
+                    source = "none" if key == "0" else SOURCE_NAMES[int(key)]
+                    if source == "none" or source in available_sources:
                         row_name = active_row[0]
                         selectors[row_name]["source"].set_active(
                             source_values.index(source)
@@ -627,6 +678,7 @@ def main() -> int:
             for row_name in row_names:
                 setup_row(row_name)
             source_choices = [
+                ("None", "none"),
                 ("MPU Accel", "mpu_accel"),
                 ("MPU Gyro", "mpu_gyro"),
                 ("LSM Accel", "lsm_accel"),
@@ -636,12 +688,20 @@ def main() -> int:
                 ("SCL Angle", "scl3300_angle"),
             ]
             source_choices = [choice for choice in source_choices
-                              if choice[1] in available_sources]
+                              if choice[1] == "none" or
+                              choice[1] in available_sources]
             source_labels = [choice[0] for choice in source_choices]
             source_values = [choice[1] for choice in source_choices]
 
             def select_source(label: str, row_name: str) -> None:
                 view[row_name]["source"] = source_values[source_labels.index(label)]
+                if log_enabled and log_scope == "displayed":
+                    with lock:
+                        logged_sources.clear()
+                        logged_sources.update(
+                            row["source"] for row in view.values()
+                            if row["source"] != "none"
+                        )
                 setup_row(row_name)
 
             def select_mode(label: str, row_name: str) -> None:
@@ -686,7 +746,7 @@ def main() -> int:
             help_text = fig.text(
                 0.4, 0.005,
                 f"{'/'.join(name.upper() for name in row_names)} select row | "
-                "1 MPU-A | 2 MPU-G | 3 LSM-A | 4 LSM-G | 5 ADXL | "
+                "0 None | 1 MPU-A | 2 MPU-G | 3 LSM-A | 4 LSM-G | 5 ADXL | "
                 "6 SCL-A | 7 SCL-angle | F frequency | T time | Q quit",
                 ha="center", fontsize=9
             )
@@ -706,6 +766,8 @@ def main() -> int:
                 now = time.perf_counter()
                 for row_index, row_name in enumerate(row_names):
                     source = view[row_name]["source"]
+                    if source == "none":
+                        continue
                     with lock:
                         points = list(buffers[source])
                     if not points:
@@ -781,6 +843,8 @@ def main() -> int:
             worker.join(timeout=3.0)
         for stream in streams.values():
             stream.close()
+        for stream in timestamp_streams.values():
+            stream.close()
         for device in devices:
             device.close()
 
@@ -788,12 +852,13 @@ def main() -> int:
     manifest = {
         "program": "multi_motion_logger", "version": CODE_VERSION,
         "common_host_rate_hz": sample_rate,
+        "log_scope": log_scope,
+        "timestamp_format": "little-endian int64 nanoseconds from common start",
         "start_unix_time_s": time.time() - elapsed,
         "duration_s": elapsed,
         "devices": {
             worker.device.name: {
                 **worker.device.metadata(),
-                "file": f"{worker.device.name}.bin",
                 "samples": worker.stats.samples,
                 "delivered_rate_hz": worker.stats.samples / elapsed,
                 "read_errors": worker.stats.errors,
@@ -802,6 +867,21 @@ def main() -> int:
                     "status_errors": worker.device.status_errors}
                    if worker.device.name == "scl3300" else {}),
             } for worker in workers
+        },
+        "sources": {
+            source: {
+                "device": SOURCE_DEVICES[source],
+                "data_file": f"{source}.bin",
+                "timestamp_file": f"{source}_time.bin",
+                "data_struct": SOURCE_BINARY_FORMATS[source],
+                "data_format": ("little-endian 3 x int32" if
+                                SOURCE_BINARY_FORMATS[source] == "<3i" else
+                                "little-endian 3 x int16"),
+                "channels": ["x", "y", "z"],
+                "units": SOURCE_UNITS[source],
+                "logged_samples": worker.stats.logged_samples[source],
+            }
+            for worker in workers for source in worker.device.sources
         },
     }
     if log_enabled:
@@ -813,6 +893,9 @@ def main() -> int:
         print(f"{name}: {details['samples']} samples, "
               f"{details['delivered_rate_hz']:.1f} Hz, "
               f"{details['read_errors']} read errors")
+    if log_enabled:
+        for source, details in manifest["sources"].items():
+            print(f"  {source}: {details['logged_samples']} logged samples")
     return 0
 
 

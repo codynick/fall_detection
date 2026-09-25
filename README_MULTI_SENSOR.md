@@ -142,7 +142,7 @@ in `.gitignore`, so local parameter changes will neither appear in `git status` 
 block a future `git pull`. After a pull, compare the reference file for newly added
 settings and copy those settings into the local file when needed.
 
-The shipped defaults are a 10-second window and three display rows. Running without
+The shipped defaults are a 10-second window and four display rows. Running without
 any configuration file also uses those defaults.
 
 ## Safe first test
@@ -178,6 +178,7 @@ silently ignored.
 ## Live display controls
 
 - `A`, `B`, `C`, or `D`: select a display row when that row is enabled.
+- `0`: set the selected row source to `None`.
 - `1`: MPU-6050 acceleration.
 - `2`: MPU-6050 gyroscope.
 - `3`: LSM6DSO acceleration.
@@ -193,7 +194,7 @@ Each row has independent source and display mode. Switching views affects only
 drawing; every enabled sensor continues to be acquired and logged.
 
 Set `display_rows` to `2`, `3`, or `4` in the `[logger]` section of the
-configuration file. The default is three. Additional rows use
+configuration file. The default is four. Additional rows use
 `section_c_source`/`section_c_view` and `section_d_source`/`section_d_view` for
 their initial selections. Invalid row counts stop with a clear error. Four-row mode
 caps the figure height at 10 inches so it fits a typical 1080p display; maximize the
@@ -201,9 +202,10 @@ window if additional plotting space is available.
 
 The right side of the graph window also has independent radio-button panels for
 every displayed row. Each panel selects a source and either `Time` or `Frequency`. The same
-source may be selected in both rows, allowing its time trace and spectrogram to be
+source may be selected in multiple rows, allowing its time trace and spectrogram to be
 viewed together. Only detected sensors appear in the panels. Mouse selections and
-keyboard shortcuts remain synchronized.
+keyboard shortcuts remain synchronized. Select `None` to leave a row blank; a None
+row does not request any source for display-scoped logging.
 
 Time-domain plots draw every sample in the active window and disable Matplotlib's
 line-path simplification. Short peaks therefore retain the same sampled shape while
@@ -226,15 +228,31 @@ when the source is delivering 1000 samples/s.
 
 Every run creates a timestamped directory under `recordings`. `session.json`
 contains the scaling, channel order, actual sample counts, achieved average rates,
-and errors. Rows have no embedded timestamps; row `n` corresponds nominally to
-`(n-1)/common_host_rate_hz`. The files are:
+errors, logging scope and file names.
 
-| File | One row |
+The default `log_scope = displayed` records only logical sources currently selected
+in at least one non-None row. Time and Frequency views are equivalent for logging,
+and selecting the same source in multiple rows does not duplicate it. Logging for a
+source starts or stops when a row selection changes. Use `log_scope = all` to record
+every source from every enabled and detected sensor, regardless of the display.
+Acquisition and live buffers continue for all detected sensors in either mode.
+
+Every logical source has a raw data file and a matching timestamp file. Data rows
+contain only three sensor integers. Each timestamp is a little-endian signed int64
+number of nanoseconds from the common program start, recorded at completion of the
+host read. Timestamp and data row counts therefore match, including when a source
+is displayed during several separated intervals.
+
+| Source data file | One row |
 |---|---|
-| `mpu6050.bin` | `ax ay az gx gy gz`, six little-endian int16 |
-| `lsm6dso.bin` | `ax ay az gx gy gz`, six little-endian int16 |
-| `adxl355.bin` | `ax ay az`, three little-endian int32 containing sign-extended 20-bit values |
-| `scl3300.bin` | `ax ay az angle_x angle_y angle_z`, six little-endian int16 |
+| `mpu_accel.bin`, `mpu_gyro.bin` | X/Y/Z, three little-endian int16 |
+| `lsm_accel.bin`, `lsm_gyro.bin` | X/Y/Z, three little-endian int16 |
+| `adxl355_accel.bin` | X/Y/Z, three little-endian int32 containing sign-extended 20-bit values |
+| `scl3300_accel.bin`, `scl3300_angle.bin` | X/Y/Z, three little-endian int16 |
+
+The corresponding timestamp file inserts `_time` before `.bin`, for example
+`mpu_accel_time.bin`. Files for available but never selected sources may be empty in
+`displayed` mode.
 
 MATLAB example:
 
@@ -242,19 +260,22 @@ MATLAB example:
 folder = 'recordings/motion_YYYYMMDD_HHMMSS';
 meta = jsondecode(fileread(fullfile(folder, 'session.json')));
 
-fid = fopen(fullfile(folder, 'mpu6050.bin'), 'rb', 'ieee-le');
-mpu = fread(fid, [6 Inf], 'int16=>double').'; fclose(fid);
-mpu(:,1:3) = mpu(:,1:3) / meta.devices.mpu6050.accel_lsb_per_g;
-mpu(:,4:6) = mpu(:,4:6) / meta.devices.mpu6050.gyro_lsb_per_dps;
-t_mpu = (0:size(mpu,1)-1).' / meta.common_host_rate_hz;
+fid = fopen(fullfile(folder, 'mpu_accel.bin'), 'rb', 'ieee-le');
+mpu_accel = fread(fid, [3 Inf], 'int16=>double').'; fclose(fid);
+mpu_accel = mpu_accel / meta.devices.mpu6050.accel_lsb_per_g;
 
-fid = fopen(fullfile(folder, 'adxl355.bin'), 'rb', 'ieee-le');
+fid = fopen(fullfile(folder, 'mpu_accel_time.bin'), 'rb', 'ieee-le');
+t_mpu = fread(fid, Inf, 'int64=>double'); fclose(fid);
+t_mpu = t_mpu * 1e-9;  % seconds from common program start
+
+fid = fopen(fullfile(folder, 'adxl355_accel.bin'), 'rb', 'ieee-le');
 adxl = fread(fid, [3 Inf], 'int32=>double').'; fclose(fid);
 adxl = adxl / meta.devices.adxl355.lsb_per_g;
 ```
 
-Use the same six-column `int16=>double` pattern for LSM6DSO and SCL3300, applying
-the scale fields in `session.json`.
+Use the same three-column `int16=>double` pattern for LSM6DSO and SCL3300,
+applying the scale fields in `session.json`. Host timestamps describe when Python
+completed each read; they are not hardware conversion timestamps.
 
 ## Future geophone
 
