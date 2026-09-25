@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Four-sensor Raspberry Pi motion logger with an interactive two-row display.
 
-Keys: A/B selects a row, 1-7 selects its source, S shows a spectrogram,
+Keys: A/B selects a row, 1-7 selects its source, F shows a spectrogram,
 T shows time-domain data, and Q quits. Run with --config to load the INI file.
 """
 
@@ -25,7 +25,7 @@ import spidev
 from smbus2 import SMBus
 
 
-CODE_VERSION = "2.0.1"
+CODE_VERSION = "2.0.2"
 SOURCE_NAMES = {
     1: "mpu_accel",
     2: "mpu_gyro",
@@ -528,6 +528,12 @@ def main() -> int:
             while not stop_event.wait(0.25):
                 pass
         else:
+            # Matplotlib normally assigns F to fullscreen. Reserve it for the
+            # selected row's frequency-domain display instead.
+            plt.rcParams["keymap.fullscreen"] = [
+                key for key in plt.rcParams["keymap.fullscreen"]
+                if key.lower() != "f"
+            ]
             fig, axes = plt.subplots(2, 3, figsize=(14, 7), sharex="row")
             fig.canvas.manager.set_window_title(f"Multi Motion Logger v{CODE_VERSION}")
             active_row = ["a"]
@@ -585,8 +591,8 @@ def main() -> int:
                     if source in available_sources:
                         view[active_row[0]]["source"] = source
                         setup_row(active_row[0])
-                elif key in ("s", "t"):
-                    view[active_row[0]]["mode"] = "spectrogram" if key == "s" else "time"
+                elif key in ("f", "t"):
+                    view[active_row[0]]["mode"] = "spectrogram" if key == "f" else "time"
                     setup_row(active_row[0])
                 elif key in ("q", "escape"):
                     stop_event.set()
@@ -597,7 +603,7 @@ def main() -> int:
             help_text = fig.text(
                 0.5, 0.005,
                 "A/B select row | 1 MPU-A | 2 MPU-G | 3 LSM-A | 4 LSM-G | "
-                "5 ADXL | 6 SCL-A | 7 SCL-angle | S spectrum | T time | Q quit",
+                "5 ADXL | 6 SCL-A | 7 SCL-angle | F frequency | T time | Q quit",
                 ha="center", fontsize=9
             )
             title = fig.suptitle(f"Multi Motion Logger v{CODE_VERSION}")
@@ -640,18 +646,26 @@ def main() -> int:
                     elif now - last_spectrum[row_name] >= spectrum_period:
                         if len(data) < fft_samples:
                             continue
+                        elapsed = data[-1, 0] - data[0, 0]
+                        effective_rate = ((len(data) - 1) / elapsed
+                                          if elapsed > 0 else sample_rate)
                         for channel, axis, image in zip(
                                 range(1, 4), axes[row_index, :], artists[row_name]):
                             frequencies, spectrum, hop = make_spectrogram(
-                                data[:, channel], sample_rate, fft_samples, fft_overlap
+                                data[:, channel], effective_rate,
+                                fft_samples, fft_overlap
                             )
                             if spectrum.size:
                                 limit = spectrum_limit(source)
                                 visible = frequencies <= limit
                                 frequencies, spectrum = frequencies[visible], spectrum[visible]
-                                frame_times = (data[0, 0] +
-                                               (fft_samples / 2 +
-                                                np.arange(spectrum.shape[1]) * hop) / sample_rate)
+                                center_indices = (fft_samples / 2 +
+                                                  np.arange(spectrum.shape[1]) * hop)
+                                frame_times = np.interp(
+                                    center_indices,
+                                    np.arange(len(data), dtype=float),
+                                    data[:, 0],
+                                )
                                 image.set_data(spectrum)
                                 image.set_extent((frame_times[0], frame_times[-1],
                                                   frequencies[0], frequencies[-1]))

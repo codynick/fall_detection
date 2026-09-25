@@ -167,7 +167,7 @@ silently ignored.
 - `5`: ADXL355 acceleration.
 - `6`: SCL3300 acceleration.
 - `7`: SCL3300 inclination angles.
-- `S`: show a spectrogram in the selected row.
+- `F`: show a frequency-domain spectrogram in the selected row.
 - `T`: show time-domain traces in the selected row.
 - `Q` or Escape: stop cleanly.
 
@@ -178,6 +178,12 @@ With the default 256-sample FFT and 75% overlap at 1000 Hz, each FFT frame spans
 256 ms, adjacent columns start 64 ms apart, and frequency-bin spacing is 3.90625 Hz.
 `spectrogram_hz` controls how often the image is redrawn, not how much logged data
 is acquired.
+
+The spectrogram derives its time extent and frequency scale from the timestamps of
+the selected source. Consequently it fills the active time window even when that
+sensor's delivered rate is below the requested host rate, and its displayed
+frequency calibration follows the achieved rate. The figures above are exact only
+when the source is delivering 1000 samples/s.
 
 ## Binary output and MATLAB
 
