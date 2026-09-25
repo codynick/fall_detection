@@ -147,6 +147,16 @@ python3 multi_motion_logger.py --config multi_motion_logger.cfg
 The configuration file is loaded only when explicitly named with `--config`.
 `--no-plot` runs logging without the graph. `--no-log` disables file output.
 
+All four sensor sections are enabled in the supplied configuration, but
+`require_all_sensors = false` makes startup tolerant of incremental assembly. If an
+enabled interface does not exist, a sensor is disconnected, or its identity check
+fails, the program prints `WARNING: Skipping ...` and continues with every sensor
+it did detect. It stops only when no sensor is available. Set an uninstalled
+sensor's `enabled = false` to suppress its warning, or set
+`require_all_sensors = true` when you want any missing sensor to be a fatal test
+failure. Invalid configuration values are still treated as errors rather than
+silently ignored.
+
 ## Live display controls
 
 - `A` or `B`: select the upper or lower display row.

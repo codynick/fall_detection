@@ -17,7 +17,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO
+from typing import BinaryIO, Callable
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -25,7 +25,7 @@ import spidev
 from smbus2 import SMBus
 
 
-CODE_VERSION = "2.0.0"
+CODE_VERSION = "2.0.1"
 SOURCE_NAMES = {
     1: "mpu_accel",
     2: "mpu_gyro",
@@ -420,36 +420,57 @@ def main() -> int:
 
     devices: list[object] = []
     streams: dict[str, BinaryIO] = {}
+    require_all = get_bool(logger, "require_all_sensors", False)
+
+    def add_sensor(label: str, factory: Callable[[], object]) -> None:
+        try:
+            device = factory()
+        except (OSError, RuntimeError) as exc:
+            message = f"Skipping {label}: {exc}"
+            if require_all:
+                raise RuntimeError(message) from exc
+            print(f"WARNING: {message}")
+            return
+        devices.append(device)
+        print(f"Detected {label}")
+
     try:
         section = config["mpu6050"]
         if get_bool(section, "enabled", True):
-            devices.append(MPU6050(section.getint("bus"), int(section["address"], 0),
-                                   section.getint("accel_range"),
-                                   section.getint("gyro_range")))
-            print("Detected MPU-6050 on I2C bus 1" if section.getint("bus") == 1
-                  else f"Detected MPU-6050 on I2C bus {section.getint('bus')}")
+            add_sensor(
+                f"MPU-6050 on I2C bus {section.getint('bus')}",
+                lambda: MPU6050(section.getint("bus"), int(section["address"], 0),
+                                section.getint("accel_range"),
+                                section.getint("gyro_range")),
+            )
         section = config["lsm6dso"]
         if get_bool(section, "enabled", True):
-            devices.append(LSM6DSO(section.getint("bus"), int(section["address"], 0),
-                                   section.getint("accel_range"),
-                                   section.getint("gyro_range")))
-            print(f"Detected LSM6DSO on I2C bus {section.getint('bus')}")
+            add_sensor(
+                f"LSM6DSO on I2C bus {section.getint('bus')}",
+                lambda: LSM6DSO(section.getint("bus"), int(section["address"], 0),
+                                section.getint("accel_range"),
+                                section.getint("gyro_range")),
+            )
         section = config["adxl355"]
         if get_bool(section, "enabled", True):
-            devices.append(ADXL355(section.getint("spi_bus"),
-                                   section.getint("spi_device"),
-                                   section.getint("spi_speed_hz"),
-                                   section.getint("accel_range")))
-            print(f"Detected ADXL355 on SPI{section.getint('spi_bus')}."
-                  f"{section.getint('spi_device')}")
+            add_sensor(
+                f"ADXL355 on SPI{section.getint('spi_bus')}."
+                f"{section.getint('spi_device')}",
+                lambda: ADXL355(section.getint("spi_bus"),
+                                section.getint("spi_device"),
+                                section.getint("spi_speed_hz"),
+                                section.getint("accel_range")),
+            )
         section = config["scl3300"]
         if get_bool(section, "enabled", True):
-            devices.append(SCL3300(section.getint("spi_bus"),
-                                   section.getint("spi_device"),
-                                   section.getint("spi_speed_hz"),
-                                   section.getint("mode")))
-            print(f"Detected SCL3300 on SPI{section.getint('spi_bus')}."
-                  f"{section.getint('spi_device')}")
+            add_sensor(
+                f"SCL3300 on SPI{section.getint('spi_bus')}."
+                f"{section.getint('spi_device')}",
+                lambda: SCL3300(section.getint("spi_bus"),
+                                section.getint("spi_device"),
+                                section.getint("spi_speed_hz"),
+                                section.getint("mode")),
+            )
     except BaseException:
         for device in devices:
             device.close()
