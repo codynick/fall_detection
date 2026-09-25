@@ -127,13 +127,31 @@ i2cdetect -y 2
 Bus 1 should show `68`; bus 2 should show `6b`. `i2cdetect` cannot identify the SPI
 sensors—the program validates their identity registers during startup.
 
+## Personal configuration without Git conflicts
+
+`multi_motion_logger.cfg` is the tracked reference configuration and can change in
+future releases. Do not make routine experiment changes directly in that file.
+Create a personal copy once:
+
+```bash
+cp multi_motion_logger.cfg multi_motion_logger.local.cfg
+```
+
+Edit `multi_motion_logger.local.cfg` and run the logger with that file. It is listed
+in `.gitignore`, so local parameter changes will neither appear in `git status` nor
+block a future `git pull`. After a pull, compare the reference file for newly added
+settings and copy those settings into the local file when needed.
+
+The shipped defaults are a 10-second window and three display rows. Running without
+any configuration file also uses those defaults.
+
 ## Safe first test
 
-Test one board at a time. In `multi_motion_logger.cfg`, set `enabled = false` for
+Test one board at a time. In `multi_motion_logger.local.cfg`, set `enabled = false` for
 the other three sensors, enable the board under test, then run:
 
 ```bash
-python3 multi_motion_logger.py --config multi_motion_logger.cfg --no-log
+python3 multi_motion_logger.py --config multi_motion_logger.local.cfg --no-log
 ```
 
 The program prints a detection line. Gently rotate the board and confirm the
@@ -141,7 +159,7 @@ expected axis responds. Stop with `Q`, Escape or Ctrl+C. Repeat for every board,
 then enable all four and run the same command. For actual logging, omit `--no-log`:
 
 ```bash
-python3 multi_motion_logger.py --config multi_motion_logger.cfg
+python3 multi_motion_logger.py --config multi_motion_logger.local.cfg
 ```
 
 The configuration file is loaded only when explicitly named with `--config`.
@@ -175,8 +193,9 @@ Each row has independent source and display mode. Switching views affects only
 drawing; every enabled sensor continues to be acquired and logged.
 
 Set `display_rows = 2` or `display_rows = 3` in the `[logger]` section of the
-configuration file. Three-row mode adds row C, whose initial selections are set by
-`section_c_source` and `section_c_view`. Invalid row counts stop with a clear error.
+configuration file. The default is three. Three-row mode adds row C, whose initial
+selections are set by `section_c_source` and `section_c_view`. Invalid row counts
+stop with a clear error.
 
 The right side of the graph window also has independent radio-button panels for
 every displayed row. Each panel selects a source and either `Time` or `Frequency`. The same

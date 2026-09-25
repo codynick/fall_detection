@@ -26,7 +26,7 @@ import spidev
 from smbus2 import SMBus
 
 
-CODE_VERSION = "2.2.0"
+CODE_VERSION = "2.2.1"
 SOURCE_NAMES = {
     1: "mpu_accel",
     2: "mpu_gyro",
@@ -376,11 +376,11 @@ def get_bool(section: configparser.SectionProxy, key: str, default: bool) -> boo
 def load_settings(path: Path | None) -> configparser.ConfigParser:
     config = configparser.ConfigParser()
     config.read_dict({
-        "logger": {"sample_rate_hz": "1000", "window_seconds": "5",
+        "logger": {"sample_rate_hz": "1000", "window_seconds": "10",
                    "plot_hz": "20", "scale_hz": "3", "spectrogram_hz": "2",
                    "fft_samples": "256", "fft_overlap_percent": "75",
                    "log_enabled": "true", "output_directory": "recordings",
-                   "display_rows": "2",
+                   "display_rows": "3",
                    "section_a_source": "mpu_accel", "section_a_view": "time",
                    "section_b_source": "mpu_gyro", "section_b_view": "time",
                    "section_c_source": "adxl355_accel",
@@ -416,7 +416,7 @@ def main() -> int:
     logger = config["logger"]
     sample_rate = logger.getfloat("sample_rate_hz")
     window_seconds = logger.getfloat("window_seconds")
-    display_rows = logger.getint("display_rows", fallback=2)
+    display_rows = logger.getint("display_rows", fallback=3)
     if display_rows not in (2, 3):
         raise ValueError("display_rows must be 2 or 3")
     row_names = tuple("abc"[:display_rows])
