@@ -174,6 +174,12 @@ silently ignored.
 Each row has independent source and display mode. Switching views affects only
 drawing; every enabled sensor continues to be acquired and logged.
 
+The right side of the graph window also has independent radio-button panels for
+rows A and B. Each panel selects a source and either `Time` or `Frequency`. The same
+source may be selected in both rows, allowing its time trace and spectrogram to be
+viewed together. Only detected sensors appear in the panels. Mouse selections and
+keyboard shortcuts remain synchronized.
+
 With the default 256-sample FFT and 75% overlap at 1000 Hz, each FFT frame spans
 256 ms, adjacent columns start 64 ms apart, and frequency-bin spacing is 3.90625 Hz.
 `spectrogram_hz` controls how often the image is redrawn, not how much logged data

@@ -20,12 +20,13 @@ from pathlib import Path
 from typing import BinaryIO, Callable
 
 import matplotlib.pyplot as plt
+from matplotlib.widgets import RadioButtons
 import numpy as np
 import spidev
 from smbus2 import SMBus
 
 
-CODE_VERSION = "2.0.2"
+CODE_VERSION = "2.1.0"
 SOURCE_NAMES = {
     1: "mpu_accel",
     2: "mpu_gyro",
@@ -538,6 +539,7 @@ def main() -> int:
             fig.canvas.manager.set_window_title(f"Multi Motion Logger v{CODE_VERSION}")
             active_row = ["a"]
             artists: dict[str, list[object]] = {"a": [], "b": []}
+            selectors: dict[str, dict[str, RadioButtons]] = {}
             last_scale = {"a": 0.0, "b": 0.0}
             last_spectrum = {"a": 0.0, "b": 0.0}
             dimensions = ("X", "Y", "Z")
@@ -589,25 +591,75 @@ def main() -> int:
                 elif key in tuple(str(number) for number in SOURCE_NAMES):
                     source = SOURCE_NAMES[int(key)]
                     if source in available_sources:
-                        view[active_row[0]]["source"] = source
-                        setup_row(active_row[0])
+                        row_name = active_row[0]
+                        selectors[row_name]["source"].set_active(
+                            source_values.index(source)
+                        )
                 elif key in ("f", "t"):
-                    view[active_row[0]]["mode"] = "spectrogram" if key == "f" else "time"
-                    setup_row(active_row[0])
+                    selectors[active_row[0]]["mode"].set_active(
+                        1 if key == "f" else 0
+                    )
                 elif key in ("q", "escape"):
                     stop_event.set()
 
             fig.canvas.mpl_connect("key_press_event", on_key)
             setup_row("a")
             setup_row("b")
+            source_choices = [
+                ("MPU Accel", "mpu_accel"),
+                ("MPU Gyro", "mpu_gyro"),
+                ("LSM Accel", "lsm_accel"),
+                ("LSM Gyro", "lsm_gyro"),
+                ("ADXL Accel", "adxl355_accel"),
+                ("SCL Accel", "scl3300_accel"),
+                ("SCL Angle", "scl3300_angle"),
+            ]
+            source_choices = [choice for choice in source_choices
+                              if choice[1] in available_sources]
+            source_labels = [choice[0] for choice in source_choices]
+            source_values = [choice[1] for choice in source_choices]
+
+            def select_source(label: str, row_name: str) -> None:
+                view[row_name]["source"] = source_values[source_labels.index(label)]
+                setup_row(row_name)
+
+            def select_mode(label: str, row_name: str) -> None:
+                view[row_name]["mode"] = ("time" if label == "Time"
+                                          else "spectrogram")
+                setup_row(row_name)
+
+            for row_name, y_position in (("a", 0.55), ("b", 0.12)):
+                source_axis = fig.add_axes((0.805, y_position, 0.115, 0.34))
+                mode_axis = fig.add_axes((0.925, y_position + 0.09, 0.07, 0.16))
+                source_axis.set_title(f"Row {row_name.upper()} source", fontsize=9)
+                mode_axis.set_title("View", fontsize=9)
+                source_radio = RadioButtons(
+                    source_axis, source_labels,
+                    active=source_values.index(view[row_name]["source"]),
+                )
+                mode_radio = RadioButtons(
+                    mode_axis, ("Time", "Frequency"),
+                    active=0 if view[row_name]["mode"] == "time" else 1,
+                )
+                for label in (*source_radio.labels, *mode_radio.labels):
+                    label.set_fontsize(8)
+                source_radio.on_clicked(
+                    lambda label, row=row_name: select_source(label, row)
+                )
+                mode_radio.on_clicked(
+                    lambda label, row=row_name: select_mode(label, row)
+                )
+                selectors[row_name] = {"source": source_radio, "mode": mode_radio}
+
             help_text = fig.text(
-                0.5, 0.005,
+                0.4, 0.005,
                 "A/B select row | 1 MPU-A | 2 MPU-G | 3 LSM-A | 4 LSM-G | "
                 "5 ADXL | 6 SCL-A | 7 SCL-angle | F frequency | T time | Q quit",
                 ha="center", fontsize=9
             )
             title = fig.suptitle(f"Multi Motion Logger v{CODE_VERSION}")
-            fig.tight_layout(rect=(0, 0.035, 1, 0.94))
+            fig.subplots_adjust(left=0.06, right=0.78, bottom=0.09,
+                                top=0.90, hspace=0.38, wspace=0.28)
             plot_period = 1.0 / max(1.0, logger.getfloat("plot_hz"))
             scale_period = 1.0 / max(0.1, logger.getfloat("scale_hz"))
             spectrum_period = 1.0 / max(0.1, logger.getfloat("spectrogram_hz"))
