@@ -2,9 +2,9 @@
 
 `multi_motion_logger.py` acquires the MPU-6050, LSM6DSO, ADXL355 and SCL3300
 simultaneously. Each sensor has its own bus/interface. The program logs compact raw
-binary data while displaying two independently selectable XYZ views. This is a
-prototype driver and must be verified on the actual boards before relying on its
-measurements.
+binary data while displaying two or three independently selectable XYZ views. This
+is a prototype driver and must be verified on the actual boards before relying on
+its measurements.
 
 ## Important rate interpretation
 
@@ -159,7 +159,7 @@ silently ignored.
 
 ## Live display controls
 
-- `A` or `B`: select the upper or lower display row.
+- `A`, `B`, or `C`: select a display row (`C` is available in three-row mode).
 - `1`: MPU-6050 acceleration.
 - `2`: MPU-6050 gyroscope.
 - `3`: LSM6DSO acceleration.
@@ -174,8 +174,12 @@ silently ignored.
 Each row has independent source and display mode. Switching views affects only
 drawing; every enabled sensor continues to be acquired and logged.
 
+Set `display_rows = 2` or `display_rows = 3` in the `[logger]` section of the
+configuration file. Three-row mode adds row C, whose initial selections are set by
+`section_c_source` and `section_c_view`. Invalid row counts stop with a clear error.
+
 The right side of the graph window also has independent radio-button panels for
-rows A and B. Each panel selects a source and either `Time` or `Frequency`. The same
+every displayed row. Each panel selects a source and either `Time` or `Frequency`. The same
 source may be selected in both rows, allowing its time trace and spectrogram to be
 viewed together. Only detected sensors appear in the panels. Mouse selections and
 keyboard shortcuts remain synchronized.

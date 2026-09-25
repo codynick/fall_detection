@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Four-sensor Raspberry Pi motion logger with an interactive two-row display.
+"""Four-sensor Raspberry Pi motion logger with a two- or three-row display.
 
-Keys: A/B selects a row, 1-7 selects its source, F shows a spectrogram,
+Keys: A/B/C selects a row, 1-7 selects its source, F shows a spectrogram,
 T shows time-domain data, and Q quits. Run with --config to load the INI file.
 """
 
@@ -26,7 +26,7 @@ import spidev
 from smbus2 import SMBus
 
 
-CODE_VERSION = "2.1.1"
+CODE_VERSION = "2.2.0"
 SOURCE_NAMES = {
     1: "mpu_accel",
     2: "mpu_gyro",
@@ -380,8 +380,11 @@ def load_settings(path: Path | None) -> configparser.ConfigParser:
                    "plot_hz": "20", "scale_hz": "3", "spectrogram_hz": "2",
                    "fft_samples": "256", "fft_overlap_percent": "75",
                    "log_enabled": "true", "output_directory": "recordings",
+                   "display_rows": "2",
                    "section_a_source": "mpu_accel", "section_a_view": "time",
-                   "section_b_source": "mpu_gyro", "section_b_view": "time"},
+                   "section_b_source": "mpu_gyro", "section_b_view": "time",
+                   "section_c_source": "adxl355_accel",
+                   "section_c_view": "time"},
         "mpu6050": {"enabled": "true", "bus": "1", "address": "0x68",
                     "accel_range": "2", "gyro_range": "250"},
         "lsm6dso": {"enabled": "true", "bus": "2", "address": "0x6B",
@@ -413,6 +416,10 @@ def main() -> int:
     logger = config["logger"]
     sample_rate = logger.getfloat("sample_rate_hz")
     window_seconds = logger.getfloat("window_seconds")
+    display_rows = logger.getint("display_rows", fallback=2)
+    if display_rows not in (2, 3):
+        raise ValueError("display_rows must be 2 or 3")
+    row_names = tuple("abc"[:display_rows])
     log_enabled = get_bool(logger, "log_enabled", True) and not args.no_log
     output_root = Path(logger.get("output_directory", "recordings"))
     session_dir = output_root / time.strftime("motion_%Y%m%d_%H%M%S")
@@ -512,11 +519,15 @@ def main() -> int:
         worker.start_time = start_time
     start_event.set()
 
+    default_sources = {"a": "mpu_accel", "b": "mpu_gyro",
+                       "c": "adxl355_accel"}
     view = {
-        "a": {"source": logger.get("section_a_source", "mpu_accel"),
-              "mode": logger.get("section_a_view", "time")},
-        "b": {"source": logger.get("section_b_source", "mpu_gyro"),
-              "mode": logger.get("section_b_view", "time")},
+        row_name: {
+            "source": logger.get(f"section_{row_name}_source",
+                                 default_sources[row_name]),
+            "mode": logger.get(f"section_{row_name}_view", "time"),
+        }
+        for row_name in row_names
     }
     for row in view.values():
         if row["source"] not in available_sources:
@@ -539,13 +550,16 @@ def main() -> int:
             # decimation and path simplification can otherwise select a different
             # subset of a peak on successive redraws.
             plt.rcParams["path.simplify"] = False
-            fig, axes = plt.subplots(2, 3, figsize=(14, 7), sharex="row")
+            fig, axes = plt.subplots(
+                display_rows, 3, figsize=(14, 3.2 * display_rows + 0.6),
+                sharex="row"
+            )
             fig.canvas.manager.set_window_title(f"Multi Motion Logger v{CODE_VERSION}")
             active_row = ["a"]
-            artists: dict[str, list[object]] = {"a": [], "b": []}
+            artists: dict[str, list[object]] = {name: [] for name in row_names}
             selectors: dict[str, dict[str, RadioButtons]] = {}
-            last_scale = {"a": 0.0, "b": 0.0}
-            last_spectrum = {"a": 0.0, "b": 0.0}
+            last_scale = {name: 0.0 for name in row_names}
+            last_spectrum = {name: 0.0 for name in row_names}
             dimensions = ("X", "Y", "Z")
             colors = ("tab:blue", "tab:orange", "tab:green")
 
@@ -562,7 +576,7 @@ def main() -> int:
                 return min(500.0, sample_rate / 2)
 
             def setup_row(row_name: str) -> None:
-                row_index = 0 if row_name == "a" else 1
+                row_index = row_names.index(row_name)
                 source = view[row_name]["source"]
                 mode = view[row_name]["mode"]
                 artists[row_name] = []
@@ -587,7 +601,7 @@ def main() -> int:
 
             def on_key(event: object) -> None:
                 key = (event.key or "").lower()
-                if key in ("a", "b"):
+                if key in row_names:
                     old = active_row[0]
                     active_row[0] = key
                     setup_row(old)
@@ -607,8 +621,8 @@ def main() -> int:
                     stop_event.set()
 
             fig.canvas.mpl_connect("key_press_event", on_key)
-            setup_row("a")
-            setup_row("b")
+            for row_name in row_names:
+                setup_row(row_name)
             source_choices = [
                 ("MPU Accel", "mpu_accel"),
                 ("MPU Gyro", "mpu_gyro"),
@@ -632,9 +646,20 @@ def main() -> int:
                                           else "spectrogram")
                 setup_row(row_name)
 
-            for row_name, y_position in (("a", 0.55), ("b", 0.12)):
-                source_axis = fig.add_axes((0.805, y_position, 0.115, 0.34))
-                mode_axis = fig.add_axes((0.925, y_position + 0.09, 0.07, 0.16))
+            controls_top = 0.90
+            controls_bottom = 0.09
+            controls_row_height = ((controls_top - controls_bottom) /
+                                   display_rows)
+            for row_index, row_name in enumerate(row_names):
+                row_bottom = controls_top - (row_index + 1) * controls_row_height
+                source_axis = fig.add_axes(
+                    (0.805, row_bottom + 0.02, 0.115,
+                     controls_row_height - 0.04)
+                )
+                mode_axis = fig.add_axes(
+                    (0.925, row_bottom + (controls_row_height - 0.16) / 2,
+                     0.07, 0.16)
+                )
                 source_axis.set_title(f"Row {row_name.upper()} source", fontsize=9)
                 mode_axis.set_title("View", fontsize=9)
                 source_radio = RadioButtons(
@@ -657,8 +682,9 @@ def main() -> int:
 
             help_text = fig.text(
                 0.4, 0.005,
-                "A/B select row | 1 MPU-A | 2 MPU-G | 3 LSM-A | 4 LSM-G | "
-                "5 ADXL | 6 SCL-A | 7 SCL-angle | F frequency | T time | Q quit",
+                f"{'/'.join(name.upper() for name in row_names)} select row | "
+                "1 MPU-A | 2 MPU-G | 3 LSM-A | 4 LSM-G | 5 ADXL | "
+                "6 SCL-A | 7 SCL-angle | F frequency | T time | Q quit",
                 ha="center", fontsize=9
             )
             title = fig.suptitle(f"Multi Motion Logger v{CODE_VERSION}")
@@ -675,7 +701,7 @@ def main() -> int:
 
             while not stop_event.is_set() and plt.fignum_exists(fig.number):
                 now = time.perf_counter()
-                for row_name, row_index in (("a", 0), ("b", 1)):
+                for row_index, row_name in enumerate(row_names):
                     source = view[row_name]["source"]
                     with lock:
                         points = list(buffers[source])
