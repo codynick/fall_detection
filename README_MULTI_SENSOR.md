@@ -180,6 +180,12 @@ source may be selected in both rows, allowing its time trace and spectrogram to 
 viewed together. Only detected sensors appear in the panels. Mouse selections and
 keyboard shortcuts remain synchronized.
 
+Time-domain plots draw every sample in the active window and disable Matplotlib's
+line-path simplification. Short peaks therefore retain the same sampled shape while
+moving across the window. This increases rendering work for long windows; lower
+`plot_hz` if display responsiveness becomes poor. This setting affects only the
+display and never the binary logging rate.
+
 With the default 256-sample FFT and 75% overlap at 1000 Hz, each FFT frame spans
 256 ms, adjacent columns start 64 ms apart, and frequency-bin spacing is 3.90625 Hz.
 `spectrogram_hz` controls how often the image is redrawn, not how much logged data

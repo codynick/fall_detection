@@ -26,7 +26,7 @@ import spidev
 from smbus2 import SMBus
 
 
-CODE_VERSION = "2.1.0"
+CODE_VERSION = "2.1.1"
 SOURCE_NAMES = {
     1: "mpu_accel",
     2: "mpu_gyro",
@@ -535,6 +535,10 @@ def main() -> int:
                 key for key in plt.rcParams["keymap.fullscreen"]
                 if key.lower() != "f"
             ]
+            # Preserve short transients as the scrolling window advances. Manual
+            # decimation and path simplification can otherwise select a different
+            # subset of a peak on successive redraws.
+            plt.rcParams["path.simplify"] = False
             fig, axes = plt.subplots(2, 3, figsize=(14, 7), sharex="row")
             fig.canvas.manager.set_window_title(f"Multi Motion Logger v{CODE_VERSION}")
             active_row = ["a"]
@@ -682,12 +686,10 @@ def main() -> int:
                     left = max(0.0, data[-1, 0] - window_seconds)
                     right = max(window_seconds, data[-1, 0])
                     if view[row_name]["mode"] == "time":
-                        stride = max(1, int(np.ceil(len(data) / 2000)))
-                        shown = data[::stride]
                         rescale = now - last_scale[row_name] >= scale_period
                         for channel, axis, line in zip(
                                 range(1, 4), axes[row_index, :], artists[row_name]):
-                            line.set_data(shown[:, 0], shown[:, channel])
+                            line.set_data(data[:, 0], data[:, channel])
                             axis.set_xlim(left, right)
                             if rescale:
                                 low, high = np.min(data[:, channel]), np.max(data[:, channel])
