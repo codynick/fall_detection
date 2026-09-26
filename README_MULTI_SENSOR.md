@@ -229,7 +229,10 @@ when the source is delivering 1000 samples/s.
 
 Every X/Y/Z subplot shows identical level figures in Time and Frequency view. They
 are calculated from the shared time-sample buffer before either rendering path, so
-changing view does not change the values. Values are shown as `now/max`.
+changing view does not change the values. A compact box inside the upper-right of
+each plot contains three number pairs in the order `RMS | Peak | SNR`; every pair is
+`now/max` in dB. A single legend above the plot grid documents this order. `--/--`
+means that the power interval is not full yet or SNR has not been calibrated.
 
 - RMS now is mean-square power over the latest analysis interval, expressed with
   `10*log10(power/reference^2)`.

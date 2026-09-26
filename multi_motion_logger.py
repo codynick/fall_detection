@@ -26,7 +26,7 @@ import spidev
 from smbus2 import SMBus
 
 
-CODE_VERSION = "3.1.0"
+CODE_VERSION = "3.1.1"
 SOURCE_NAMES = {
     1: "mpu_accel",
     2: "mpu_gyro",
@@ -732,8 +732,11 @@ def main() -> int:
                         loc="left", fontsize=9
                     )
                     metric_artists[row_name].append(axis.text(
-                        1.0, 1.01, "Waiting for data", transform=axis.transAxes,
-                        ha="right", va="bottom", fontsize=7
+                        0.99, 0.98, "--/-- | --/-- | --/--",
+                        transform=axis.transAxes, ha="right", va="top",
+                        fontsize=7, family="monospace",
+                        bbox={"facecolor": "white", "alpha": 0.72,
+                              "edgecolor": "none", "pad": 1.5}
                     ))
                     axis.set_xlabel("Time (s)")
                     if mode == "time":
@@ -864,19 +867,18 @@ def main() -> int:
                 })
 
             def format_metrics(metrics: dict[str, np.ndarray] | None,
-                               channel: int, source: str) -> str:
+                               channel: int) -> str:
                 if metrics is None:
-                    return "Waiting for power window"
+                    return "--/-- | --/-- | --/--"
                 rms = (f"{metrics['rms_now'][channel]:.1f}/"
                        f"{metrics['rms_max'][channel]:.1f}")
                 peak = (f"{metrics['peak_now'][channel]:.1f}/"
                         f"{metrics['peak_max'][channel]:.1f}")
-                text = (f"RMS {rms} | Peak {peak} dB re 1 "
-                        f"{SOURCE_UNITS[source]} (now/max)")
+                snr = "--/--"
                 if snr_enabled:
                     if "snr_now" not in metrics or not np.isfinite(
                             metrics["snr_now"][channel]):
-                        snr = "N/A"
+                        snr = "--/--"
                     else:
                         now_snr = (f"{metrics['snr_now'][channel]:.1f}"
                                    if metrics["snr_now_valid"][channel]
@@ -884,9 +886,8 @@ def main() -> int:
                         max_snr = (f"{metrics['snr_max'][channel]:.1f}"
                                    if metrics["snr_max_valid"][channel]
                                    else "<0")
-                        snr = f"{now_snr}/{max_snr} dB"
-                    text += f"\nSNR {snr} (now/max)"
-                return text
+                        snr = f"{now_snr}/{max_snr}"
+                return f"{rms} | {peak} | {snr}"
 
             controls_top = 0.90
             controls_bottom = 0.09
@@ -930,8 +931,14 @@ def main() -> int:
                 ha="center", fontsize=9
             )
             title = fig.suptitle(f"Multi Motion Logger v{CODE_VERSION}")
+            fig.text(
+                0.4, 0.925,
+                "Per plot (dB, now/max):  RMS  |  Peak  |  SNR   "
+                "[reference = 1 axis unit]",
+                ha="center", va="bottom", fontsize=8
+            )
             fig.subplots_adjust(left=0.06, right=0.78, bottom=0.09,
-                                top=0.90, hspace=0.38, wspace=0.28)
+                                top=0.89, hspace=0.38, wspace=0.28)
             last_rate_time = time.perf_counter()
             last_rate_counts = {worker.device.name: 0 for worker in workers}
             displayed_rates = {worker.device.name: 0.0 for worker in workers}
@@ -963,7 +970,7 @@ def main() -> int:
                     for channel, metric_artist in enumerate(
                             metric_artists[row_name]):
                         metric_artist.set_text(
-                            format_metrics(metrics, channel, source)
+                            format_metrics(metrics, channel)
                             if power_enabled else "Power disabled"
                         )
                     if view[row_name]["mode"] == "time":
