@@ -165,6 +165,21 @@ python3 multi_motion_logger.py --config multi_motion_logger.local.cfg
 The configuration file is loaded only when explicitly named with `--config`.
 `--no-plot` runs logging without the graph. `--no-log` disables file output.
 
+In `--no-plot` mode, the terminal refreshes a dashboard for every detected logical
+source. It reports achieved device rate, latest XYZ measurements, RMS now/max, Peak
+now/max, and SNR now/max. Type `n` then Enter to run the same manual noise
+calibration used by the GUI; type `q` then Enter to stop cleanly. Configure it with:
+
+```ini
+terminal_metrics_enabled = true
+terminal_hz = 1
+```
+
+Terminal calculations run only at this refresh rate and do not determine acquisition
+timing. For a clean acquisition-rate benchmark with no graph or metric calculations,
+temporarily set `terminal_metrics_enabled = false` and run with both `--no-plot` and
+`--no-log`.
+
 All four sensor sections are enabled in the supplied configuration, but
 `require_all_sensors = false` makes startup tolerant of incremental assembly. If an
 enabled interface does not exist, a sensor is disconnected, or its identity check

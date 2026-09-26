@@ -11,8 +11,10 @@ import argparse
 import collections
 import configparser
 import json
+import select
 import signal
 import struct
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -26,7 +28,7 @@ import spidev
 from smbus2 import SMBus
 
 
-CODE_VERSION = "3.2.2"
+CODE_VERSION = "3.3.0"
 SOURCE_NAMES = {
     1: "mpu_accel",
     2: "mpu_gyro",
@@ -477,6 +479,7 @@ def load_settings(path: Path | None) -> configparser.ConfigParser:
                    "snr_enabled": "true", "snr_calibration_seconds": "5",
                    "snr_calibration_max_spread_db": "6",
                    "snr_floor_db": "0",
+                   "terminal_metrics_enabled": "true", "terminal_hz": "1",
                    "log_enabled": "true", "output_directory": "recordings",
                    "log_scope": "displayed", "display_rows": "4",
                    "section_a_source": "mpu_accel", "section_a_view": "time",
@@ -517,6 +520,19 @@ def main() -> int:
     sample_rate = logger.getfloat("sample_rate_hz")
     window_seconds = logger.getfloat("window_seconds")
     snr_seconds = max(0.5, logger.getfloat("snr_calibration_seconds"))
+    fft_samples = logger.getint("fft_samples")
+    fft_overlap = logger.getfloat("fft_overlap_percent")
+    fft_hop = max(1, fft_samples - min(
+        int(fft_samples * fft_overlap / 100.0), fft_samples - 1
+    ))
+    power_enabled = get_bool(logger, "power_enabled", True)
+    power_frames = max(1, logger.getint("power_frames"))
+    power_samples = fft_samples + (power_frames - 1) * fft_hop
+    power_remove_dc = get_bool(logger, "power_remove_dc", True)
+    power_floor_db = logger.getfloat("power_floor_db")
+    snr_enabled = get_bool(logger, "snr_enabled", True)
+    snr_max_spread = logger.getfloat("snr_calibration_max_spread_db")
+    snr_floor_db = logger.getfloat("snr_floor_db")
     display_rows = logger.getint("display_rows", fallback=4)
     if display_rows not in (2, 3, 4):
         raise ValueError("display_rows must be 2, 3, or 4")
@@ -624,6 +640,54 @@ def main() -> int:
     noise_power: dict[str, np.ndarray] = {}
     noise_calibrations: list[dict[str, object]] = []
 
+    def calculate_noise_reference(calibration_start: float,
+                                  finished_at: float) -> tuple[int, int]:
+        accepted = 0
+        rejected = 0
+        spread_record: dict[str, list[float | None]] = {}
+        for source in sorted(available_sources):
+            with lock:
+                points = list(buffers[source])
+            samples = np.asarray([
+                point[1:] for point in points
+                if calibration_start <= point[0] <= finished_at
+            ], dtype=float)
+            previous = noise_power.get(
+                source, np.full(3, np.nan, dtype=float)
+            ).copy()
+            powers = (rolling_mean_square(
+                samples, power_samples, fft_hop, power_remove_dc
+            ) if len(samples) else np.empty((0, 3)))
+            if not len(powers):
+                spread_record[source] = [None, None, None]
+                rejected += 3
+                continue
+            median_power = np.median(powers, axis=0)
+            percentile90 = np.percentile(powers, 90, axis=0)
+            tiny = np.finfo(float).tiny
+            spread = 10.0 * np.log10(
+                np.maximum(percentile90, tiny) /
+                np.maximum(median_power, tiny)
+            )
+            valid = np.isfinite(median_power) & (median_power > 0)
+            valid &= spread <= snr_max_spread
+            previous[valid] = median_power[valid]
+            if np.any(np.isfinite(previous)):
+                noise_power[source] = previous
+            accepted += int(np.count_nonzero(valid))
+            rejected += int(3 - np.count_nonzero(valid))
+            spread_record[source] = [
+                float(value) if np.isfinite(value) else None
+                for value in spread
+            ]
+        noise_calibrations.append({
+            "elapsed_time_s": finished_at,
+            "accepted_channels": accepted,
+            "rejected_channels": rejected,
+            "spread_db": spread_record,
+        })
+        return accepted, rejected
+
     if log_enabled:
         for source in sorted(available_sources):
             streams[source] = (session_dir / f"{source}.bin").open(
@@ -654,8 +718,120 @@ def main() -> int:
 
     try:
         if args.no_plot:
-            while not stop_event.wait(0.25):
-                pass
+            terminal_metrics = get_bool(
+                logger, "terminal_metrics_enabled", True
+            )
+            if not terminal_metrics:
+                while not stop_event.wait(0.25):
+                    pass
+            else:
+                terminal_period = 1.0 / max(
+                    0.1, logger.getfloat("terminal_hz")
+                )
+                last_terminal_update = time.perf_counter()
+                last_rate_time = last_terminal_update
+                last_rate_counts = {
+                    worker.device.name: 0 for worker in workers
+                }
+                terminal_rates = {
+                    worker.device.name: 0.0 for worker in workers
+                }
+                terminal_calibration_start: float | None = None
+                terminal_message = "SNR not calibrated; type n then Enter"
+                print("Terminal dashboard: n + Enter calibrates noise; "
+                      "q + Enter quits.")
+                while not stop_event.is_set():
+                    now = time.perf_counter()
+                    elapsed_now = now - start_time
+                    if sys.stdin.isatty():
+                        try:
+                            readable, _, _ = select.select(
+                                [sys.stdin], [], [], 0
+                            )
+                        except (OSError, ValueError):
+                            readable = []
+                        if readable:
+                            command = sys.stdin.readline().strip().lower()
+                            if command == "n" and snr_enabled:
+                                terminal_calibration_start = elapsed_now
+                                terminal_message = "Noise calibration running"
+                            elif command == "q":
+                                stop_event.set()
+                                continue
+                    if (terminal_calibration_start is not None and
+                            elapsed_now - terminal_calibration_start >= snr_seconds):
+                        accepted, rejected = calculate_noise_reference(
+                            terminal_calibration_start, elapsed_now
+                        )
+                        terminal_message = (
+                            f"Noise calibration: {accepted} accepted, "
+                            f"{rejected} rejected"
+                        )
+                        terminal_calibration_start = None
+                    if now - last_terminal_update >= terminal_period:
+                        rate_interval = now - last_rate_time
+                        if rate_interval > 0:
+                            for worker in workers:
+                                name = worker.device.name
+                                terminal_rates[name] = (
+                                    worker.stats.samples - last_rate_counts[name]
+                                ) / rate_interval
+                                last_rate_counts[name] = worker.stats.samples
+                        last_rate_time = now
+                        if sys.stdout.isatty():
+                            print("\033[2J\033[H", end="")
+                        print(f"Multi Motion Logger v{CODE_VERSION}  "
+                              f"elapsed {elapsed_now:.1f} s")
+                        if terminal_calibration_start is not None:
+                            progress = min(
+                                snr_seconds,
+                                elapsed_now - terminal_calibration_start
+                            )
+                            print(f"NOISE CALIBRATION "
+                                  f"{progress:.1f}/{snr_seconds:.1f} s")
+                        else:
+                            print(terminal_message)
+                        print("Values: latest | RMS now/max | Peak now/max | "
+                              "SNR now/max (dB)")
+                        for source in sorted(available_sources):
+                            with lock:
+                                points = list(buffers[source])
+                            if not points:
+                                continue
+                            data = np.asarray(points)
+                            data = data[
+                                data[:, 0] >= data[-1, 0] - window_seconds
+                            ]
+                            metrics = (level_metrics(
+                                data[:, 1:4], power_samples, fft_hop,
+                                power_remove_dc, power_floor_db,
+                                noise_power.get(source) if snr_enabled else None,
+                                snr_floor_db,
+                            ) if power_enabled else None)
+                            rate = terminal_rates[SOURCE_DEVICES[source]]
+                            print(f"\n{SOURCE_LABELS[source]}  "
+                                  f"{rate:.1f} Hz  [{SOURCE_UNITS[source]}]")
+                            for channel, label in enumerate(("X", "Y", "Z")):
+                                latest = data[-1, channel + 1]
+                                if metrics is None:
+                                    report = "--/-- | --/-- | --/--"
+                                else:
+                                    rms = (f"{metrics['rms_now'][channel]:.1f}/"
+                                           f"{metrics['rms_max'][channel]:.1f}")
+                                    peak = (f"{metrics['peak_now'][channel]:.1f}/"
+                                            f"{metrics['peak_max'][channel]:.1f}")
+                                    if ("snr_now" in metrics and np.isfinite(
+                                            metrics["snr_now"][channel])):
+                                        snr = (f"{metrics['snr_now'][channel]:.1f}/"
+                                               f"{metrics['snr_max'][channel]:.1f}")
+                                    else:
+                                        snr = "--/--"
+                                    report = f"{rms} | {peak} | {snr}"
+                                print(f"  {label} {latest: .6f} | {report}")
+                        print("\nCommands: n + Enter = calibrate, "
+                              "q + Enter = quit", flush=True)
+                        last_terminal_update = now
+                    stop_event.wait(0.05)
         else:
             # Matplotlib normally assigns F to fullscreen. Reserve it for the
             # selected row's frequency-domain display instead.
@@ -686,19 +862,6 @@ def main() -> int:
             plot_period = 1.0 / max(1.0, logger.getfloat("plot_hz"))
             scale_period = 1.0 / max(0.1, logger.getfloat("scale_hz"))
             spectrum_period = 1.0 / max(0.1, logger.getfloat("spectrogram_hz"))
-            fft_samples = logger.getint("fft_samples")
-            fft_overlap = logger.getfloat("fft_overlap_percent")
-            fft_hop = max(1, fft_samples - min(
-                int(fft_samples * fft_overlap / 100.0), fft_samples - 1
-            ))
-            power_enabled = get_bool(logger, "power_enabled", True)
-            power_frames = max(1, logger.getint("power_frames"))
-            power_samples = fft_samples + (power_frames - 1) * fft_hop
-            power_remove_dc = get_bool(logger, "power_remove_dc", True)
-            power_floor_db = logger.getfloat("power_floor_db")
-            snr_enabled = get_bool(logger, "snr_enabled", True)
-            snr_max_spread = logger.getfloat("snr_calibration_max_spread_db")
-            snr_floor_db = logger.getfloat("snr_floor_db")
             calibration = {"active": False, "start": 0.0, "message": "",
                            "message_until": 0.0, "completed": 0}
 
@@ -824,44 +987,9 @@ def main() -> int:
                 setup_row(row_name)
 
             def finish_noise_calibration(finished_at: float) -> None:
-                accepted = 0
-                rejected = 0
-                spread_record: dict[str, list[float | None]] = {}
-                for source in sorted(available_sources):
-                    with lock:
-                        points = list(buffers[source])
-                    samples = np.asarray([
-                        point[1:] for point in points
-                        if calibration["start"] <= point[0] <= finished_at
-                    ], dtype=float)
-                    previous = noise_power.get(
-                        source, np.full(3, np.nan, dtype=float)
-                    ).copy()
-                    powers = (rolling_mean_square(
-                        samples, power_samples, fft_hop, power_remove_dc
-                    ) if len(samples) else np.empty((0, 3)))
-                    if not len(powers):
-                        spread_record[source] = [None, None, None]
-                        rejected += 3
-                        continue
-                    median_power = np.median(powers, axis=0)
-                    percentile90 = np.percentile(powers, 90, axis=0)
-                    tiny = np.finfo(float).tiny
-                    spread = 10.0 * np.log10(
-                        np.maximum(percentile90, tiny) /
-                        np.maximum(median_power, tiny)
-                    )
-                    valid = np.isfinite(median_power) & (median_power > 0)
-                    valid &= spread <= snr_max_spread
-                    previous[valid] = median_power[valid]
-                    if np.any(np.isfinite(previous)):
-                        noise_power[source] = previous
-                    accepted += int(np.count_nonzero(valid))
-                    rejected += int(3 - np.count_nonzero(valid))
-                    spread_record[source] = [
-                        float(value) if np.isfinite(value) else None
-                        for value in spread
-                    ]
+                accepted, rejected = calculate_noise_reference(
+                    float(calibration["start"]), finished_at
+                )
                 calibration["active"] = False
                 calibration["completed"] += 1
                 calibration["message"] = (
@@ -869,12 +997,6 @@ def main() -> int:
                     f"{rejected} rejected"
                 )
                 calibration["message_until"] = time.perf_counter() + 5.0
-                noise_calibrations.append({
-                    "elapsed_time_s": finished_at,
-                    "accepted_channels": accepted,
-                    "rejected_channels": rejected,
-                    "spread_db": spread_record,
-                })
 
             def format_metrics(metrics: dict[str, np.ndarray] | None,
                                channel: int) -> str:
