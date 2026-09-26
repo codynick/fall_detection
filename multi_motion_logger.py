@@ -26,7 +26,7 @@ import spidev
 from smbus2 import SMBus
 
 
-CODE_VERSION = "3.2.0"
+CODE_VERSION = "3.2.1"
 SOURCE_NAMES = {
     1: "mpu_accel",
     2: "mpu_gyro",
@@ -677,7 +677,6 @@ def main() -> int:
             artists: dict[str, list[object]] = {name: [] for name in row_names}
             selectors: dict[str, dict[str, RadioButtons]] = {}
             metric_artists: dict[str, list[object]] = {name: [] for name in row_names}
-            snr_max_artists: dict[str, list[object]] = {name: [] for name in row_names}
             last_scale = {name: 0.0 for name in row_names}
             last_spectrum = {name: 0.0 for name in row_names}
             dimensions = ("X", "Y", "Z")
@@ -719,7 +718,6 @@ def main() -> int:
                 mode = view[row_name]["mode"]
                 artists[row_name] = []
                 metric_artists[row_name] = []
-                snr_max_artists[row_name] = []
                 for dimension, color, axis in zip(dimensions, colors, axes[row_index, :]):
                     axis.clear()
                     axis.set_axis_on()
@@ -738,11 +736,6 @@ def main() -> int:
                         fontsize=7, family="monospace",
                         bbox={"facecolor": "white", "alpha": 0.72,
                               "edgecolor": "none", "pad": 1.5}
-                    ))
-                    snr_max_artists[row_name].append(axis.text(
-                        1.0, 1.01, "SNR = -- dB", transform=axis.transAxes,
-                        ha="right", va="bottom", fontsize=10,
-                        fontweight="bold"
                     ))
                     axis.set_xlabel("Time (s)")
                     if mode == "time":
@@ -805,6 +798,9 @@ def main() -> int:
 
             def select_source(label: str, row_name: str) -> None:
                 view[row_name]["source"] = source_values[source_labels.index(label)]
+                table_row = row_names.index(row_name) + 1
+                for channel in range(3):
+                    snr_table[(table_row, channel)].get_text().set_text("--")
                 if log_enabled and log_scope == "displayed":
                     with lock:
                         logged_sources.clear()
@@ -923,21 +919,38 @@ def main() -> int:
                 )
                 selectors[row_name] = {"source": source_radio, "mode": mode_radio}
 
+            snr_table_axis = fig.add_axes((0.015, 0.008, 0.235, 0.085))
+            snr_table_axis.axis("off")
+            snr_table_axis.set_title("Maximum SNR (dB)", fontsize=8, pad=1)
+            snr_table = snr_table_axis.table(
+                cellText=[["--", "--", "--"] for _ in row_names],
+                rowLabels=[name.upper() for name in row_names],
+                colLabels=list(dimensions), cellLoc="center", loc="center",
+                bbox=(0, 0, 1, 1)
+            )
+            snr_table.auto_set_font_size(False)
+            snr_table.set_fontsize(7)
+            for row_index in range(len(row_names)):
+                for channel in range(3):
+                    snr_table[(row_index + 1, channel)].get_text().set_fontweight(
+                        "bold"
+                    )
+
             help_text = fig.text(
-                0.4, 0.005,
+                0.275, 0.012,
                 f"{'/'.join(name.upper() for name in row_names)} select row | "
-                "0 None | 1 MPU-A | 2 MPU-G | 3 LSM-A | 4 LSM-G | 5 ADXL | "
-                "6 SCL-A | 7 SCL-angle | F frequency | T time | N noise | Q quit",
-                ha="center", fontsize=9
+                "0 None | 1 MPU-A | 2 MPU-G | 3 LSM-A | 4 LSM-G\n"
+                "5 ADXL | 6 SCL-A | 7 SCL-angle | F frequency | T time | "
+                "N noise | Q quit",
+                ha="left", va="bottom", fontsize=8
             )
             title = fig.suptitle(f"Multi Motion Logger v{CODE_VERSION}")
             fig.text(
                 0.4, 0.925,
-                "Inside: RMS now/max | Peak now/max | SNR now (dB)   "
-                "Bold above: SNR max",
+                "Inside each plot: RMS now/max | Peak now/max | SNR now (dB)",
                 ha="center", va="bottom", fontsize=8
             )
-            fig.subplots_adjust(left=0.06, right=0.78, bottom=0.09,
+            fig.subplots_adjust(left=0.06, right=0.78, bottom=0.13,
                                 top=0.89, hspace=0.38, wspace=0.28)
             last_rate_time = time.perf_counter()
             last_rate_counts = {worker.device.name: 0 for worker in workers}
@@ -973,15 +986,15 @@ def main() -> int:
                             format_metrics(metrics, channel)
                             if power_enabled else "Power disabled"
                         )
-                    for channel, snr_artist in enumerate(
-                            snr_max_artists[row_name]):
+                    for channel in range(3):
                         if (metrics is not None and "snr_max" in metrics and
                                 np.isfinite(metrics["snr_max"][channel])):
-                            snr_artist.set_text(
-                                f"SNR = {metrics['snr_max'][channel]:.1f} dB"
-                            )
+                            value = f"{metrics['snr_max'][channel]:.1f}"
                         else:
-                            snr_artist.set_text("SNR = -- dB")
+                            value = "--"
+                        snr_table[(row_index + 1, channel)].get_text().set_text(
+                            value
+                        )
                     if view[row_name]["mode"] == "time":
                         rescale = now - last_scale[row_name] >= scale_period
                         for channel, axis, line in zip(
