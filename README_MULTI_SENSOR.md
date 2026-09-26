@@ -231,11 +231,12 @@ Every X/Y/Z subplot shows identical level figures in Time and Frequency view. Th
 are calculated from the shared time-sample buffer before either rendering path, so
 changing view does not change the values. A compact box inside the upper-right of
 each plot contains `RMS now/max | Peak now/max | SNR now`, all in dB. Maximum SNR
-for every displayed row and X/Y/Z axis appears in a single table at the lower-left
-of the window. Its numeric cells are bold. The table adapts to the configured row
-count, and duplicate sources still have separate row entries. A single legend above
-the plot grid documents the compact in-plot order. Dashes mean that the power
-interval is not full yet or SNR has not been calibrated.
+is restored above the upper-right corner of every plot in larger bold type. A
+second bold report in the free top-right area lists `A: X | Y | Z` and similarly
+for every enabled row, without drawing a table. Each maximum-SNR number uses the
+same threshold color: below 2 dB grey, 2 to below 5 dB light green, 5 to below
+10 dB green, and 10 dB or higher red. Dashes mean that the power interval is not
+full yet or SNR has not been calibrated.
 
 - RMS now is mean-square power over the latest analysis interval, expressed with
   `10*log10(power/reference^2)`.

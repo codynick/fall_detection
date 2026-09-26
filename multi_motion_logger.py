@@ -26,7 +26,7 @@ import spidev
 from smbus2 import SMBus
 
 
-CODE_VERSION = "3.2.1"
+CODE_VERSION = "3.2.2"
 SOURCE_NAMES = {
     1: "mpu_accel",
     2: "mpu_gyro",
@@ -677,6 +677,8 @@ def main() -> int:
             artists: dict[str, list[object]] = {name: [] for name in row_names}
             selectors: dict[str, dict[str, RadioButtons]] = {}
             metric_artists: dict[str, list[object]] = {name: [] for name in row_names}
+            snr_max_artists: dict[str, list[object]] = {name: [] for name in row_names}
+            snr_report_artists: dict[str, list[object]] = {}
             last_scale = {name: 0.0 for name in row_names}
             last_spectrum = {name: 0.0 for name in row_names}
             dimensions = ("X", "Y", "Z")
@@ -718,6 +720,7 @@ def main() -> int:
                 mode = view[row_name]["mode"]
                 artists[row_name] = []
                 metric_artists[row_name] = []
+                snr_max_artists[row_name] = []
                 for dimension, color, axis in zip(dimensions, colors, axes[row_index, :]):
                     axis.clear()
                     axis.set_axis_on()
@@ -736,6 +739,11 @@ def main() -> int:
                         fontsize=7, family="monospace",
                         bbox={"facecolor": "white", "alpha": 0.72,
                               "edgecolor": "none", "pad": 1.5}
+                    ))
+                    snr_max_artists[row_name].append(axis.text(
+                        1.0, 1.01, "SNR = -- dB", transform=axis.transAxes,
+                        ha="right", va="bottom", fontsize=10,
+                        fontweight="bold", color="grey"
                     ))
                     axis.set_xlabel("Time (s)")
                     if mode == "time":
@@ -798,9 +806,9 @@ def main() -> int:
 
             def select_source(label: str, row_name: str) -> None:
                 view[row_name]["source"] = source_values[source_labels.index(label)]
-                table_row = row_names.index(row_name) + 1
                 for channel in range(3):
-                    snr_table[(table_row, channel)].get_text().set_text("--")
+                    snr_report_artists[row_name][channel].set_text("-- dB")
+                    snr_report_artists[row_name][channel].set_color("grey")
                 if log_enabled and log_scope == "displayed":
                     with lock:
                         logged_sources.clear()
@@ -885,6 +893,15 @@ def main() -> int:
                         snr = f"{metrics['snr_now'][channel]:.1f}"
                 return f"{rms} | {peak} | {snr}"
 
+            def snr_color(value: float) -> str:
+                if value < 2.0:
+                    return "grey"
+                if value < 5.0:
+                    return "#66bb6a"
+                if value < 10.0:
+                    return "green"
+                return "red"
+
             controls_top = 0.90
             controls_bottom = 0.09
             controls_row_height = ((controls_top - controls_bottom) /
@@ -919,22 +936,25 @@ def main() -> int:
                 )
                 selectors[row_name] = {"source": source_radio, "mode": mode_radio}
 
-            snr_table_axis = fig.add_axes((0.015, 0.008, 0.235, 0.085))
-            snr_table_axis.axis("off")
-            snr_table_axis.set_title("Maximum SNR (dB)", fontsize=8, pad=1)
-            snr_table = snr_table_axis.table(
-                cellText=[["--", "--", "--"] for _ in row_names],
-                rowLabels=[name.upper() for name in row_names],
-                colLabels=list(dimensions), cellLoc="center", loc="center",
-                bbox=(0, 0, 1, 1)
-            )
-            snr_table.auto_set_font_size(False)
-            snr_table.set_fontsize(7)
-            for row_index in range(len(row_names)):
-                for channel in range(3):
-                    snr_table[(row_index + 1, channel)].get_text().set_fontweight(
-                        "bold"
-                    )
+            report_y_start = 0.985
+            report_y_step = 0.021
+            for row_index, row_name in enumerate(row_names):
+                y_position = report_y_start - row_index * report_y_step
+                fig.text(0.802, y_position, f"{row_name.upper()}:",
+                         ha="left", va="top", fontsize=10,
+                         fontweight="bold", family="monospace")
+                row_artists = []
+                for channel, x_position in enumerate((0.825, 0.885, 0.945)):
+                    row_artists.append(fig.text(
+                        x_position, y_position, "-- dB", ha="left", va="top",
+                        fontsize=10, fontweight="bold", family="monospace",
+                        color="grey"
+                    ))
+                    if channel < 2:
+                        fig.text(x_position + 0.052, y_position, "|",
+                                 ha="left", va="top", fontsize=10,
+                                 fontweight="bold", color="black")
+                snr_report_artists[row_name] = row_artists
 
             help_text = fig.text(
                 0.275, 0.012,
@@ -944,13 +964,13 @@ def main() -> int:
                 "N noise | Q quit",
                 ha="left", va="bottom", fontsize=8
             )
-            title = fig.suptitle(f"Multi Motion Logger v{CODE_VERSION}")
+            title = fig.suptitle(f"Multi Motion Logger v{CODE_VERSION}", x=0.39)
             fig.text(
                 0.4, 0.925,
                 "Inside each plot: RMS now/max | Peak now/max | SNR now (dB)",
                 ha="center", va="bottom", fontsize=8
             )
-            fig.subplots_adjust(left=0.06, right=0.78, bottom=0.13,
+            fig.subplots_adjust(left=0.06, right=0.78, bottom=0.09,
                                 top=0.89, hspace=0.38, wspace=0.28)
             last_rate_time = time.perf_counter()
             last_rate_counts = {worker.device.name: 0 for worker in workers}
@@ -989,12 +1009,20 @@ def main() -> int:
                     for channel in range(3):
                         if (metrics is not None and "snr_max" in metrics and
                                 np.isfinite(metrics["snr_max"][channel])):
-                            value = f"{metrics['snr_max'][channel]:.1f}"
+                            numeric_value = float(metrics["snr_max"][channel])
+                            report_value = f"{numeric_value:.1f}dB"
+                            plot_value = f"SNR = {numeric_value:.1f} dB"
+                            color = snr_color(numeric_value)
                         else:
-                            value = "--"
-                        snr_table[(row_index + 1, channel)].get_text().set_text(
-                            value
-                        )
+                            report_value = "-- dB"
+                            plot_value = "SNR = -- dB"
+                            color = "grey"
+                        report_artist = snr_report_artists[row_name][channel]
+                        report_artist.set_text(report_value)
+                        report_artist.set_color(color)
+                        plot_artist = snr_max_artists[row_name][channel]
+                        plot_artist.set_text(plot_value)
+                        plot_artist.set_color(color)
                     if view[row_name]["mode"] == "time":
                         rescale = now - last_scale[row_name] >= scale_period
                         for channel, axis, line in zip(
