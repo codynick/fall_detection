@@ -26,7 +26,7 @@ import spidev
 from smbus2 import SMBus
 
 
-CODE_VERSION = "3.1.1"
+CODE_VERSION = "3.2.0"
 SOURCE_NAMES = {
     1: "mpu_accel",
     2: "mpu_gyro",
@@ -137,17 +137,16 @@ def level_metrics(values: np.ndarray, length: int, hop: int, remove_dc: bool,
         "peak_max": 10.0 * np.log10(np.maximum(peak_max_power, floor_power)),
     }
     if noise_power is not None:
-        current_signal = powers[-1] - noise_power
-        maximum_signal = np.max(powers, axis=0) - noise_power
-        snr_floor_ratio = 10.0 ** (snr_floor_db / 10.0)
+        # Practical live SNR: measured power relative to the calibrated noise
+        # floor. Clamp at 0 dB so below-baseline statistical fluctuations mean
+        # "no signal above noise" rather than showing negative values.
+        snr_floor_ratio = 10.0 ** (max(0.0, snr_floor_db) / 10.0)
         result["snr_now"] = 10.0 * np.log10(np.maximum(
-            current_signal / noise_power, snr_floor_ratio
+            powers[-1] / noise_power, snr_floor_ratio
         ))
         result["snr_max"] = 10.0 * np.log10(np.maximum(
-            maximum_signal / noise_power, snr_floor_ratio
+            np.max(powers, axis=0) / noise_power, snr_floor_ratio
         ))
-        result["snr_now_valid"] = current_signal > 0
-        result["snr_max_valid"] = maximum_signal > 0
     return result
 
 
@@ -477,7 +476,7 @@ def load_settings(path: Path | None) -> configparser.ConfigParser:
                    "power_remove_dc": "true", "power_floor_db": "-160",
                    "snr_enabled": "true", "snr_calibration_seconds": "5",
                    "snr_calibration_max_spread_db": "6",
-                   "snr_floor_db": "-40",
+                   "snr_floor_db": "0",
                    "log_enabled": "true", "output_directory": "recordings",
                    "log_scope": "displayed", "display_rows": "4",
                    "section_a_source": "mpu_accel", "section_a_view": "time",
@@ -678,6 +677,7 @@ def main() -> int:
             artists: dict[str, list[object]] = {name: [] for name in row_names}
             selectors: dict[str, dict[str, RadioButtons]] = {}
             metric_artists: dict[str, list[object]] = {name: [] for name in row_names}
+            snr_max_artists: dict[str, list[object]] = {name: [] for name in row_names}
             last_scale = {name: 0.0 for name in row_names}
             last_spectrum = {name: 0.0 for name in row_names}
             dimensions = ("X", "Y", "Z")
@@ -719,6 +719,7 @@ def main() -> int:
                 mode = view[row_name]["mode"]
                 artists[row_name] = []
                 metric_artists[row_name] = []
+                snr_max_artists[row_name] = []
                 for dimension, color, axis in zip(dimensions, colors, axes[row_index, :]):
                     axis.clear()
                     axis.set_axis_on()
@@ -737,6 +738,11 @@ def main() -> int:
                         fontsize=7, family="monospace",
                         bbox={"facecolor": "white", "alpha": 0.72,
                               "edgecolor": "none", "pad": 1.5}
+                    ))
+                    snr_max_artists[row_name].append(axis.text(
+                        1.0, 1.01, "SNR = -- dB", transform=axis.transAxes,
+                        ha="right", va="bottom", fontsize=10,
+                        fontweight="bold"
                     ))
                     axis.set_xlabel("Time (s)")
                     if mode == "time":
@@ -874,19 +880,13 @@ def main() -> int:
                        f"{metrics['rms_max'][channel]:.1f}")
                 peak = (f"{metrics['peak_now'][channel]:.1f}/"
                         f"{metrics['peak_max'][channel]:.1f}")
-                snr = "--/--"
+                snr = "--"
                 if snr_enabled:
                     if "snr_now" not in metrics or not np.isfinite(
                             metrics["snr_now"][channel]):
-                        snr = "--/--"
+                        snr = "--"
                     else:
-                        now_snr = (f"{metrics['snr_now'][channel]:.1f}"
-                                   if metrics["snr_now_valid"][channel]
-                                   else "<0")
-                        max_snr = (f"{metrics['snr_max'][channel]:.1f}"
-                                   if metrics["snr_max_valid"][channel]
-                                   else "<0")
-                        snr = f"{now_snr}/{max_snr}"
+                        snr = f"{metrics['snr_now'][channel]:.1f}"
                 return f"{rms} | {peak} | {snr}"
 
             controls_top = 0.90
@@ -933,8 +933,8 @@ def main() -> int:
             title = fig.suptitle(f"Multi Motion Logger v{CODE_VERSION}")
             fig.text(
                 0.4, 0.925,
-                "Per plot (dB, now/max):  RMS  |  Peak  |  SNR   "
-                "[reference = 1 axis unit]",
+                "Inside: RMS now/max | Peak now/max | SNR now (dB)   "
+                "Bold above: SNR max",
                 ha="center", va="bottom", fontsize=8
             )
             fig.subplots_adjust(left=0.06, right=0.78, bottom=0.09,
@@ -973,6 +973,15 @@ def main() -> int:
                             format_metrics(metrics, channel)
                             if power_enabled else "Power disabled"
                         )
+                    for channel, snr_artist in enumerate(
+                            snr_max_artists[row_name]):
+                        if (metrics is not None and "snr_max" in metrics and
+                                np.isfinite(metrics["snr_max"][channel])):
+                            snr_artist.set_text(
+                                f"SNR = {metrics['snr_max'][channel]:.1f} dB"
+                            )
+                        else:
+                            snr_artist.set_text("SNR = -- dB")
                     if view[row_name]["mode"] == "time":
                         rescale = now - last_scale[row_name] >= scale_period
                         for channel, axis, line in zip(

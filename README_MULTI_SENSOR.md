@@ -230,9 +230,10 @@ when the source is delivering 1000 samples/s.
 Every X/Y/Z subplot shows identical level figures in Time and Frequency view. They
 are calculated from the shared time-sample buffer before either rendering path, so
 changing view does not change the values. A compact box inside the upper-right of
-each plot contains three number pairs in the order `RMS | Peak | SNR`; every pair is
-`now/max` in dB. A single legend above the plot grid documents this order. `--/--`
-means that the power interval is not full yet or SNR has not been calibrated.
+each plot contains `RMS now/max | Peak now/max | SNR now`, all in dB. Maximum SNR
+appears separately in larger bold type above the right corner as `SNR = XX.X dB`.
+A single legend above the plot grid documents this order. Dashes mean that the
+power interval is not full yet or SNR has not been calibrated.
 
 - RMS now is mean-square power over the latest analysis interval, expressed with
   `10*log10(power/reference^2)`.
@@ -264,12 +265,13 @@ window title.
 snr_enabled = true
 snr_calibration_seconds = 5
 snr_calibration_max_spread_db = 6
-snr_floor_db = -40
+snr_floor_db = 0
 ```
 
-True SNR is calculated after subtracting calibrated noise power from measured power.
-When measured power does not exceed noise, the subplot displays `<0 dB`. Calibration
-history and accepted noise mean-square values are saved in `session.json`.
+The live practical SNR is `10*log10(measured_power/noise_power)`. It is clamped at
+0 dB, meaning no measured power above the calibrated noise floor. Maximum SNR uses
+the largest rolling RMS power still in the visible window. Calibration history and
+accepted noise mean-square values are saved in `session.json`.
 
 ## Binary output and MATLAB
 
