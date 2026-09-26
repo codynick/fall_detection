@@ -26,7 +26,7 @@ import spidev
 from smbus2 import SMBus
 
 
-CODE_VERSION = "3.0.0"
+CODE_VERSION = "3.1.0"
 SOURCE_NAMES = {
     1: "mpu_accel",
     2: "mpu_gyro",
@@ -88,6 +88,67 @@ def make_spectrogram(values: np.ndarray, sample_rate: float, fft_samples: int,
     amplitude = np.abs(np.fft.rfft(frames * window, axis=1)) / max(window.sum(), 1.0)
     spectrum_db = 20.0 * np.log10(np.maximum(amplitude, np.finfo(float).tiny))
     return np.fft.rfftfreq(length, 1.0 / sample_rate), spectrum_db.T, hop
+
+
+def rolling_mean_square(values: np.ndarray, length: int, hop: int,
+                        remove_dc: bool) -> np.ndarray:
+    """Return mean-square XYZ values for fixed-length rolling windows."""
+    if len(values) < length or length < 1:
+        return np.empty((0, values.shape[1]))
+    starts = list(range(0, len(values) - length + 1, max(1, hop)))
+    final_start = len(values) - length
+    if starts[-1] != final_start:
+        starts.append(final_start)
+    starts_array = np.asarray(starts, dtype=int)
+    ends = starts_array + length
+    cumulative = np.vstack((np.zeros((1, values.shape[1])),
+                            np.cumsum(values, axis=0)))
+    cumulative_square = np.vstack((np.zeros((1, values.shape[1])),
+                                   np.cumsum(values * values, axis=0)))
+    means = (cumulative[ends] - cumulative[starts_array]) / length
+    powers = ((cumulative_square[ends] -
+               cumulative_square[starts_array]) / length)
+    if remove_dc:
+        powers -= means * means
+    return np.maximum(powers, 0.0)
+
+
+def level_metrics(values: np.ndarray, length: int, hop: int, remove_dc: bool,
+                  floor_db: float, noise_power: np.ndarray | None,
+                  snr_floor_db: float) -> dict[str, np.ndarray] | None:
+    """Calculate current/maximum RMS and peak levels and optional SNR."""
+    powers = rolling_mean_square(values, length, hop, remove_dc)
+    if not len(powers):
+        return None
+    floor_power = 10.0 ** (floor_db / 10.0)
+    now_values = values[-length:]
+    if remove_dc:
+        now_values = now_values - np.mean(now_values, axis=0, keepdims=True)
+        visible_values = values - np.mean(values, axis=0, keepdims=True)
+    else:
+        visible_values = values
+    peak_now_power = np.max(now_values * now_values, axis=0)
+    peak_max_power = np.max(visible_values * visible_values, axis=0)
+
+    result = {
+        "rms_now": 10.0 * np.log10(np.maximum(powers[-1], floor_power)),
+        "rms_max": 10.0 * np.log10(np.maximum(np.max(powers, axis=0), floor_power)),
+        "peak_now": 10.0 * np.log10(np.maximum(peak_now_power, floor_power)),
+        "peak_max": 10.0 * np.log10(np.maximum(peak_max_power, floor_power)),
+    }
+    if noise_power is not None:
+        current_signal = powers[-1] - noise_power
+        maximum_signal = np.max(powers, axis=0) - noise_power
+        snr_floor_ratio = 10.0 ** (snr_floor_db / 10.0)
+        result["snr_now"] = 10.0 * np.log10(np.maximum(
+            current_signal / noise_power, snr_floor_ratio
+        ))
+        result["snr_max"] = 10.0 * np.log10(np.maximum(
+            maximum_signal / noise_power, snr_floor_ratio
+        ))
+        result["snr_now_valid"] = current_signal > 0
+        result["snr_max_valid"] = maximum_signal > 0
+    return result
 
 
 class MPU6050:
@@ -412,6 +473,11 @@ def load_settings(path: Path | None) -> configparser.ConfigParser:
         "logger": {"sample_rate_hz": "1000", "window_seconds": "10",
                    "plot_hz": "20", "scale_hz": "3", "spectrogram_hz": "2",
                    "fft_samples": "256", "fft_overlap_percent": "75",
+                   "power_enabled": "true", "power_frames": "5",
+                   "power_remove_dc": "true", "power_floor_db": "-160",
+                   "snr_enabled": "true", "snr_calibration_seconds": "5",
+                   "snr_calibration_max_spread_db": "6",
+                   "snr_floor_db": "-40",
                    "log_enabled": "true", "output_directory": "recordings",
                    "log_scope": "displayed", "display_rows": "4",
                    "section_a_source": "mpu_accel", "section_a_view": "time",
@@ -451,6 +517,7 @@ def main() -> int:
     logger = config["logger"]
     sample_rate = logger.getfloat("sample_rate_hz")
     window_seconds = logger.getfloat("window_seconds")
+    snr_seconds = max(0.5, logger.getfloat("snr_calibration_seconds"))
     display_rows = logger.getint("display_rows", fallback=4)
     if display_rows not in (2, 3, 4):
         raise ValueError("display_rows must be 2, 3, or 4")
@@ -543,7 +610,8 @@ def main() -> int:
         if row["mode"] not in ("time", "spectrogram"):
             row["mode"] = "time"
 
-    max_points = max(2000, int(window_seconds * sample_rate * 1.25))
+    max_points = max(2000, int(max(window_seconds, snr_seconds) *
+                               sample_rate * 1.25))
     buffers = {name: collections.deque(maxlen=max_points) for name in SOURCE_LABELS}
     lock = threading.Lock()
     stop_event = threading.Event()
@@ -554,6 +622,8 @@ def main() -> int:
          {row["source"] for row in view.values() if row["source"] != "none"})
         if log_enabled else set()
     )
+    noise_power: dict[str, np.ndarray] = {}
+    noise_calibrations: list[dict[str, object]] = []
 
     if log_enabled:
         for source in sorted(available_sources):
@@ -607,10 +677,29 @@ def main() -> int:
             active_row = ["a"]
             artists: dict[str, list[object]] = {name: [] for name in row_names}
             selectors: dict[str, dict[str, RadioButtons]] = {}
+            metric_artists: dict[str, list[object]] = {name: [] for name in row_names}
             last_scale = {name: 0.0 for name in row_names}
             last_spectrum = {name: 0.0 for name in row_names}
             dimensions = ("X", "Y", "Z")
             colors = ("tab:blue", "tab:orange", "tab:green")
+            plot_period = 1.0 / max(1.0, logger.getfloat("plot_hz"))
+            scale_period = 1.0 / max(0.1, logger.getfloat("scale_hz"))
+            spectrum_period = 1.0 / max(0.1, logger.getfloat("spectrogram_hz"))
+            fft_samples = logger.getint("fft_samples")
+            fft_overlap = logger.getfloat("fft_overlap_percent")
+            fft_hop = max(1, fft_samples - min(
+                int(fft_samples * fft_overlap / 100.0), fft_samples - 1
+            ))
+            power_enabled = get_bool(logger, "power_enabled", True)
+            power_frames = max(1, logger.getint("power_frames"))
+            power_samples = fft_samples + (power_frames - 1) * fft_hop
+            power_remove_dc = get_bool(logger, "power_remove_dc", True)
+            power_floor_db = logger.getfloat("power_floor_db")
+            snr_enabled = get_bool(logger, "snr_enabled", True)
+            snr_max_spread = logger.getfloat("snr_calibration_max_spread_db")
+            snr_floor_db = logger.getfloat("snr_floor_db")
+            calibration = {"active": False, "start": 0.0, "message": "",
+                           "message_until": 0.0, "completed": 0}
 
             def spectrum_limit(source: str) -> float:
                 if source == "adxl355_accel":
@@ -629,6 +718,7 @@ def main() -> int:
                 source = view[row_name]["source"]
                 mode = view[row_name]["mode"]
                 artists[row_name] = []
+                metric_artists[row_name] = []
                 for dimension, color, axis in zip(dimensions, colors, axes[row_index, :]):
                     axis.clear()
                     axis.set_axis_on()
@@ -637,7 +727,14 @@ def main() -> int:
                         axis.set_title(f"{prefix}{row_name.upper()}: None {dimension}")
                         axis.set_axis_off()
                         continue
-                    axis.set_title(f"{prefix}{row_name.upper()}: {SOURCE_LABELS[source]} {dimension}")
+                    axis.set_title(
+                        f"{prefix}{row_name.upper()}: {SOURCE_LABELS[source]} {dimension}",
+                        loc="left", fontsize=9
+                    )
+                    metric_artists[row_name].append(axis.text(
+                        1.0, 1.01, "Waiting for data", transform=axis.transAxes,
+                        ha="right", va="bottom", fontsize=7
+                    ))
                     axis.set_xlabel("Time (s)")
                     if mode == "time":
                         axis.set_ylabel(SOURCE_UNITS[source])
@@ -671,6 +768,10 @@ def main() -> int:
                     selectors[active_row[0]]["mode"].set_active(
                         1 if key == "f" else 0
                     )
+                elif key == "n" and snr_enabled:
+                    calibration["active"] = True
+                    calibration["start"] = time.perf_counter() - start_time
+                    calibration["message"] = ""
                 elif key in ("q", "escape"):
                     stop_event.set()
 
@@ -708,6 +809,84 @@ def main() -> int:
                 view[row_name]["mode"] = ("time" if label == "Time"
                                           else "spectrogram")
                 setup_row(row_name)
+
+            def finish_noise_calibration(finished_at: float) -> None:
+                accepted = 0
+                rejected = 0
+                spread_record: dict[str, list[float | None]] = {}
+                for source in sorted(available_sources):
+                    with lock:
+                        points = list(buffers[source])
+                    samples = np.asarray([
+                        point[1:] for point in points
+                        if calibration["start"] <= point[0] <= finished_at
+                    ], dtype=float)
+                    previous = noise_power.get(
+                        source, np.full(3, np.nan, dtype=float)
+                    ).copy()
+                    powers = (rolling_mean_square(
+                        samples, power_samples, fft_hop, power_remove_dc
+                    ) if len(samples) else np.empty((0, 3)))
+                    if not len(powers):
+                        spread_record[source] = [None, None, None]
+                        rejected += 3
+                        continue
+                    median_power = np.median(powers, axis=0)
+                    percentile90 = np.percentile(powers, 90, axis=0)
+                    tiny = np.finfo(float).tiny
+                    spread = 10.0 * np.log10(
+                        np.maximum(percentile90, tiny) /
+                        np.maximum(median_power, tiny)
+                    )
+                    valid = np.isfinite(median_power) & (median_power > 0)
+                    valid &= spread <= snr_max_spread
+                    previous[valid] = median_power[valid]
+                    if np.any(np.isfinite(previous)):
+                        noise_power[source] = previous
+                    accepted += int(np.count_nonzero(valid))
+                    rejected += int(3 - np.count_nonzero(valid))
+                    spread_record[source] = [
+                        float(value) if np.isfinite(value) else None
+                        for value in spread
+                    ]
+                calibration["active"] = False
+                calibration["completed"] += 1
+                calibration["message"] = (
+                    f"Noise calibration: {accepted} channels accepted, "
+                    f"{rejected} rejected"
+                )
+                calibration["message_until"] = time.perf_counter() + 5.0
+                noise_calibrations.append({
+                    "elapsed_time_s": finished_at,
+                    "accepted_channels": accepted,
+                    "rejected_channels": rejected,
+                    "spread_db": spread_record,
+                })
+
+            def format_metrics(metrics: dict[str, np.ndarray] | None,
+                               channel: int, source: str) -> str:
+                if metrics is None:
+                    return "Waiting for power window"
+                rms = (f"{metrics['rms_now'][channel]:.1f}/"
+                       f"{metrics['rms_max'][channel]:.1f}")
+                peak = (f"{metrics['peak_now'][channel]:.1f}/"
+                        f"{metrics['peak_max'][channel]:.1f}")
+                text = (f"RMS {rms} | Peak {peak} dB re 1 "
+                        f"{SOURCE_UNITS[source]} (now/max)")
+                if snr_enabled:
+                    if "snr_now" not in metrics or not np.isfinite(
+                            metrics["snr_now"][channel]):
+                        snr = "N/A"
+                    else:
+                        now_snr = (f"{metrics['snr_now'][channel]:.1f}"
+                                   if metrics["snr_now_valid"][channel]
+                                   else "<0")
+                        max_snr = (f"{metrics['snr_max'][channel]:.1f}"
+                                   if metrics["snr_max_valid"][channel]
+                                   else "<0")
+                        snr = f"{now_snr}/{max_snr} dB"
+                    text += f"\nSNR {snr} (now/max)"
+                return text
 
             controls_top = 0.90
             controls_bottom = 0.09
@@ -747,23 +926,22 @@ def main() -> int:
                 0.4, 0.005,
                 f"{'/'.join(name.upper() for name in row_names)} select row | "
                 "0 None | 1 MPU-A | 2 MPU-G | 3 LSM-A | 4 LSM-G | 5 ADXL | "
-                "6 SCL-A | 7 SCL-angle | F frequency | T time | Q quit",
+                "6 SCL-A | 7 SCL-angle | F frequency | T time | N noise | Q quit",
                 ha="center", fontsize=9
             )
             title = fig.suptitle(f"Multi Motion Logger v{CODE_VERSION}")
             fig.subplots_adjust(left=0.06, right=0.78, bottom=0.09,
                                 top=0.90, hspace=0.38, wspace=0.28)
-            plot_period = 1.0 / max(1.0, logger.getfloat("plot_hz"))
-            scale_period = 1.0 / max(0.1, logger.getfloat("scale_hz"))
-            spectrum_period = 1.0 / max(0.1, logger.getfloat("spectrogram_hz"))
-            fft_samples = logger.getint("fft_samples")
-            fft_overlap = logger.getfloat("fft_overlap_percent")
             last_rate_time = time.perf_counter()
             last_rate_counts = {worker.device.name: 0 for worker in workers}
             displayed_rates = {worker.device.name: 0.0 for worker in workers}
 
             while not stop_event.is_set() and plt.fignum_exists(fig.number):
                 now = time.perf_counter()
+                elapsed_now = now - start_time
+                if (calibration["active"] and
+                        elapsed_now - calibration["start"] >= snr_seconds):
+                    finish_noise_calibration(elapsed_now)
                 for row_index, row_name in enumerate(row_names):
                     source = view[row_name]["source"]
                     if source == "none":
@@ -776,6 +954,18 @@ def main() -> int:
                     data = data[data[:, 0] >= data[-1, 0] - window_seconds]
                     left = max(0.0, data[-1, 0] - window_seconds)
                     right = max(window_seconds, data[-1, 0])
+                    metrics = (level_metrics(
+                        data[:, 1:4], power_samples, fft_hop,
+                        power_remove_dc, power_floor_db,
+                        noise_power.get(source) if snr_enabled else None,
+                        snr_floor_db,
+                    ) if power_enabled else None)
+                    for channel, metric_artist in enumerate(
+                            metric_artists[row_name]):
+                        metric_artist.set_text(
+                            format_metrics(metrics, channel, source)
+                            if power_enabled else "Power disabled"
+                        )
                     if view[row_name]["mode"] == "time":
                         rescale = now - last_scale[row_name] >= scale_period
                         for channel, axis, line in zip(
@@ -833,7 +1023,18 @@ def main() -> int:
                     f"{worker.device.name} {displayed_rates[worker.device.name]:.1f} Hz"
                     for worker in workers
                 )
-                title.set_text(f"Multi Motion Logger v{CODE_VERSION} — {rates}")
+                status = ""
+                if calibration["active"]:
+                    progress = min(snr_seconds,
+                                   elapsed_now - calibration["start"])
+                    status = (f" | NOISE CALIBRATION "
+                              f"{progress:.1f}/{snr_seconds:.1f} s")
+                elif (calibration["message"] and
+                      now <= calibration["message_until"]):
+                    status = f" | {calibration['message']}"
+                title.set_text(
+                    f"Multi Motion Logger v{CODE_VERSION} — {rates}{status}"
+                )
                 fig.canvas.draw_idle()
                 plt.pause(plot_period)
             stop_event.set()
@@ -856,6 +1057,26 @@ def main() -> int:
         "timestamp_format": "little-endian int64 nanoseconds from common start",
         "start_unix_time_s": time.time() - elapsed,
         "duration_s": elapsed,
+        "level_analysis": {
+            "enabled": get_bool(logger, "power_enabled", True),
+            "power_frames": logger.getint("power_frames"),
+            "fft_samples": logger.getint("fft_samples"),
+            "fft_overlap_percent": logger.getfloat("fft_overlap_percent"),
+            "remove_dc": get_bool(logger, "power_remove_dc", True),
+            "reference": "1 in each source's displayed unit",
+        },
+        "noise_calibration": {
+            "calibration_seconds": snr_seconds,
+            "max_spread_db": logger.getfloat(
+                "snr_calibration_max_spread_db"
+            ),
+            "history": noise_calibrations,
+            "noise_mean_square_by_source": {
+                source: [float(value) if np.isfinite(value) else None
+                         for value in values]
+                for source, values in noise_power.items()
+            },
+        },
         "devices": {
             worker.device.name: {
                 **worker.device.metadata(),

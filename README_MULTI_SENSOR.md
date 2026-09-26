@@ -65,7 +65,7 @@ but not both.
 | P2-2 CS/SCL | 24 | GPIO8 / SPI0 CE0 |
 | P2-4 SCLK/VSSIO | 23 | GPIO11 / SPI0 SCLK |
 | P2-5 MISO/SDA | 21 | GPIO9 / SPI0 MISO |
-| P2-6 MOSI/SDA | 19 | GPIO10 / SPI0 MOSI |
+| P2-6 MOSI/SDA | 1   9 | GPIO10 / SPI0 MOSI |
 | P2-1 and P2-3 | Not connected | V1P8 outputs—do not power |
 
 ### Murata SCL3300-D01-PCB (SPI1)
@@ -188,6 +188,7 @@ silently ignored.
 - `7`: SCL3300 inclination angles.
 - `F`: show a frequency-domain spectrogram in the selected row.
 - `T`: show time-domain traces in the selected row.
+- `N`: measure a new noise reference for every detected source.
 - `Q` or Escape: stop cleanly.
 
 Each row has independent source and display mode. Switching views affects only
@@ -223,6 +224,49 @@ the selected source. Consequently it fills the active time window even when that
 sensor's delivered rate is below the requested host rate, and its displayed
 frequency calibration follows the achieved rate. The figures above are exact only
 when the source is delivering 1000 samples/s.
+
+## RMS, peak and SNR figures
+
+Every X/Y/Z subplot shows identical level figures in Time and Frequency view. They
+are calculated from the shared time-sample buffer before either rendering path, so
+changing view does not change the values. Values are shown as `now/max`.
+
+- RMS now is mean-square power over the latest analysis interval, expressed with
+  `10*log10(power/reference^2)`.
+- RMS max is the largest rolling RMS power interval in the visible plot window.
+- Peak now is the largest squared amplitude in the latest analysis interval.
+- Peak max is the largest squared amplitude still visible in the plot window.
+- SNR now/max uses RMS power and the most recently calibrated noise power.
+
+The numerical reference is one in the displayed unit: 1 g, 1 degree/s, or 1 degree.
+With the default 256-sample FFT, 75% overlap and five power frames, the analysis
+interval contains `256 + 4*64 = 512` samples. Change it with:
+
+```ini
+power_enabled = true
+power_frames = 5
+power_remove_dc = true
+power_floor_db = -160
+```
+
+SNR remains `N/A` until a successful manual calibration. Make the complete assembly
+quiet, press `N`, and keep it quiet for the configured interval. Plotting,
+acquisition and logging continue. The program computes the median rolling noise
+power independently for every source axis. If the 90th-percentile-to-median spread
+exceeds the allowed value, that channel is rejected and its previous valid
+reference is retained. Progress and the accepted/rejected count appear in the main
+window title.
+
+```ini
+snr_enabled = true
+snr_calibration_seconds = 5
+snr_calibration_max_spread_db = 6
+snr_floor_db = -40
+```
+
+True SNR is calculated after subtracting calibrated noise power from measured power.
+When measured power does not exceed noise, the subplot displays `<0 dB`. Calibration
+history and accepted noise mean-square values are saved in `session.json`.
 
 ## Binary output and MATLAB
 
