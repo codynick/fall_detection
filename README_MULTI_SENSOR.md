@@ -167,8 +167,11 @@ The configuration file is loaded only when explicitly named with `--config`.
 
 In `--no-plot` mode, the terminal refreshes a dashboard for every detected logical
 source. It reports achieved device rate, latest XYZ measurements, RMS now/max, Peak
-now/max, and SNR now/max. Type `n` then Enter to run the same manual noise
-calibration used by the GUI; type `q` then Enter to stop cleanly. Configure it with:
+now/max, and SNR now/max. SNR now and max values use the same grey/light-green/
+green/red thresholds as the graph. ANSI colors are emitted only when output is an
+interactive terminal, so redirected output remains plain text. Type `n` then Enter
+to run the same manual noise calibration used by the GUI; type `q` then Enter to
+stop cleanly. Configure it with:
 
 ```ini
 terminal_metrics_enabled = true

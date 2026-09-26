@@ -28,7 +28,7 @@ import spidev
 from smbus2 import SMBus
 
 
-CODE_VERSION = "3.3.0"
+CODE_VERSION = "3.3.1"
 SOURCE_NAMES = {
     1: "mpu_accel",
     2: "mpu_gyro",
@@ -640,6 +640,15 @@ def main() -> int:
     noise_power: dict[str, np.ndarray] = {}
     noise_calibrations: list[dict[str, object]] = []
 
+    def snr_level(value: float) -> str:
+        if value < 2.0:
+            return "low"
+        if value < 5.0:
+            return "light"
+        if value < 10.0:
+            return "medium"
+        return "high"
+
     def calculate_noise_reference(calibration_start: float,
                                   finished_at: float) -> tuple[int, int]:
         accepted = 0
@@ -738,6 +747,21 @@ def main() -> int:
                 }
                 terminal_calibration_start: float | None = None
                 terminal_message = "SNR not calibrated; type n then Enter"
+                terminal_colors = sys.stdout.isatty()
+                ansi_snr = {
+                    "low": "\033[90m",       # grey
+                    "light": "\033[92m",     # light green
+                    "medium": "\033[32m",    # green
+                    "high": "\033[91m",      # bright red
+                }
+
+                def terminal_snr(value: float) -> str:
+                    formatted = f"{value:.1f}"
+                    if not terminal_colors:
+                        return formatted
+                    return (f"{ansi_snr[snr_level(value)]}{formatted}"
+                            "\033[0m")
+
                 print("Terminal dashboard: n + Enter calibrates noise; "
                       "q + Enter quits.")
                 while not stop_event.is_set():
@@ -822,8 +846,13 @@ def main() -> int:
                                             f"{metrics['peak_max'][channel]:.1f}")
                                     if ("snr_now" in metrics and np.isfinite(
                                             metrics["snr_now"][channel])):
-                                        snr = (f"{metrics['snr_now'][channel]:.1f}/"
-                                               f"{metrics['snr_max'][channel]:.1f}")
+                                        snr = (
+                                            terminal_snr(
+                                                metrics["snr_now"][channel]
+                                            ) + "/" + terminal_snr(
+                                                metrics["snr_max"][channel]
+                                            )
+                                        )
                                     else:
                                         snr = "--/--"
                                     report = f"{rms} | {peak} | {snr}"
@@ -1016,13 +1045,12 @@ def main() -> int:
                 return f"{rms} | {peak} | {snr}"
 
             def snr_color(value: float) -> str:
-                if value < 2.0:
-                    return "grey"
-                if value < 5.0:
-                    return "#66bb6a"
-                if value < 10.0:
-                    return "green"
-                return "red"
+                return {
+                    "low": "grey",
+                    "light": "#66bb6a",
+                    "medium": "green",
+                    "high": "red",
+                }[snr_level(value)]
 
             controls_top = 0.90
             controls_bottom = 0.09
