@@ -1,5 +1,9 @@
 # Four-sensor motion logger for Raspberry Pi 5
 
+For the Windows-first operating procedure—from connecting to the device through
+viewing a live spectrogram to making a short recording—see
+[`QUICK_START_USER_GUIDE.md`](QUICK_START_USER_GUIDE.md).
+
 `multi_motion_logger.py` acquires the MPU-6050, LSM6DSO, ADXL355 and SCL3300
 simultaneously. Each sensor has its own bus/interface. The program logs compact raw
 binary data while displaying two to four independently selectable XYZ views. This
