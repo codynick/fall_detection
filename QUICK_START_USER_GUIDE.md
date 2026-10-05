@@ -19,11 +19,11 @@ Have these items ready:
 - a Windows computer with Wi-Fi;
 - a sealed **plastic** bottle partly filled with water;
 - the Raspberry Pi login password supplied by the device administrator; and
-- [MobaXterm](https://mobaxterm.mobatek.net/) installed on Windows.
+- Windows Remote Desktop Connection, which is included with Windows.
 
-MobaXterm is used because it provides both an SSH terminal and the graphical
-forwarding needed to show the Python graph on Windows. The hotspot password and
-the Raspberry Pi login password are separate passwords.
+The user works in the Raspberry Pi desktop through Windows Remote Desktop, then
+opens a terminal inside Raspberry Pi OS. The hotspot password and Raspberry Pi
+login password are separate passwords.
 
 Place the Safety Node on a stable surface. Clear people, animals, glass and other
 fragile objects away from the test area. Do not throw a glass bottle.
@@ -51,46 +51,37 @@ fragile objects away from the test area. Do not throw a glass bottle.
 
 The Raspberry Pi has the fixed address `10.42.0.1` on this hotspot.
 
-## Part 2 — Open the Safety Node from Windows
+## Part 2 — Log in with Windows Remote Desktop
 
-1. Start MobaXterm.
-2. Confirm that its X server is running. MobaXterm normally starts it
-   automatically and shows its status near the upper-right corner.
-3. Select **Session**, then **SSH**.
-4. In **Remote host**, enter:
+1. Open the Windows Start menu, type **Remote Desktop Connection**, and open it.
+   Its executable name is `mstsc`.
+2. In **Computer**, enter:
 
    ```text
    10.42.0.1
    ```
 
-5. Select **Specify username** and enter:
+3. Select **Connect**.
+4. If Windows displays an identity or certificate warning, confirm that the
+   address is `10.42.0.1`, then accept it for this Safety Node.
+5. At the Raspberry Pi login screen, enter:
 
    ```text
-   admin
+   Username: admin
+   Password: the Raspberry Pi login password
    ```
 
-6. Ensure **X11-forwarding** is enabled in the session's advanced SSH settings.
-7. Start the session.
-8. If this is the first connection, accept the host-key prompt only after
-   confirming that you are connecting to the Safety Node.
-9. Enter the Raspberry Pi login password when requested.
-
-At the terminal prompt, check graphical forwarding:
-
-```bash
-echo $DISPLAY
-```
-
-A value such as `localhost:10.0` means graphical forwarding is available. An
-empty response means it is not; close the session, confirm that MobaXterm's X
-server and X11-forwarding are enabled, and reconnect.
+6. Wait for the Raspberry Pi OS desktop to appear inside the Remote Desktop
+   window.
+7. Open a terminal from the Raspberry Pi desktop. Use this Raspberry Pi terminal
+   for all commands in the following sections.
 
 ## Part 3 — Start a live test without logging
 
 Change to the program folder:
 
 ```bash
-cd /home/admin/babak/fall_detection
+cd babak/fall_detection/
 ```
 
 Start the application with logging explicitly disabled:
@@ -161,9 +152,76 @@ not stop the other installed sensors from being measured.
    floor position and drop height.
 9. Press `Q` or `Escape` to stop the no-log run cleanly.
 
+## Optional — Change the configuration
+
+The supplied configuration is suitable for the standard demonstration. A new user
+does not need to edit it. If a test requires different display settings, first
+make a personal copy so that future Git updates are not blocked by a locally edited
+tracked file:
+
+```bash
+cp multi_motion_logger.cfg multi_motion_logger.local.cfg
+```
+
+Open the personal copy using the Raspberry Pi text editor, or from the terminal:
+
+```bash
+nano multi_motion_logger.local.cfg
+```
+
+The most useful `[logger]` settings are:
+
+| Setting | What the user can change |
+|---|---|
+| `sample_rate_hz` | Requested common host polling rate; keep the tested default `1000` unless the test plan requires otherwise |
+| `window_seconds` | Number of recent seconds shown; default `10` |
+| `display_rows` | Number of visible rows: `2`, `3`, or `4` |
+| `plot_hz` | Time-plot redraw rate; reducing it can make a remote desktop smoother |
+| `scale_hz` | How often time-plot vertical limits are recalculated |
+| `spectrogram_hz` | Spectrogram redraw rate; it does not change sensor sampling |
+| `fft_samples` | FFT length; larger values improve frequency resolution but reduce time resolution |
+| `fft_overlap_percent` | Overlap between adjacent FFT frames |
+| `power_enabled` | `true` shows RMS/peak calculations; `false` disables them |
+| `power_frames` | Number of overlapping FFT-length intervals used for live power figures |
+| `snr_enabled` | `true` enables SNR calculation and manual noise calibration |
+| `snr_calibration_seconds` | Duration of the quiet calibration after pressing `N` |
+| `log_enabled` | Master logging switch; `--no-log` always disables logging for that run |
+| `log_scope` | `displayed` logs selected row sources; `all` logs every detected source |
+| `output_directory` | Parent folder for new recording sessions |
+
+Initial content for each row can also be changed with:
+
+```ini
+section_a_source = mpu_accel
+section_a_view = time
+section_b_source = mpu_gyro
+section_b_view = time
+```
+
+Rows C and D use equivalent `section_c_...` and `section_d_...` settings. Valid
+views are `time` and `frequency`. A source can be `none`, `mpu_accel`, `mpu_gyro`,
+`lsm_accel`, `lsm_gyro`, `adxl355_accel`, `scl3300_accel`, or `scl3300_angle`.
+
+Do not change the I2C/SPI bus numbers, addresses, sensor ranges or sensor modes
+unless instructed by the device maintainer. Those settings must agree with the
+physical wiring and affect measurement conversion.
+
+To use the personal configuration without logging:
+
+```bash
+python3 multi_motion_logger.py --config multi_motion_logger.local.cfg --no-log
+```
+
+To use it with logging, omit only `--no-log`:
+
+```bash
+python3 multi_motion_logger.py --config multi_motion_logger.local.cfg
+```
+
 ## Part 6 — Make a short recording
 
-Return to the MobaXterm terminal. Start the same program **without** `--no-log`:
+Return to the terminal in the Raspberry Pi desktop. Start the same program
+**without** `--no-log`:
 
 ```bash
 python3 multi_motion_logger.py --config multi_motion_logger.cfg
@@ -199,9 +257,51 @@ ls -dt recordings/motion_* | head -1
 The folder contains `session.json` plus binary data and timestamp files for the
 recorded sources. Keep the whole folder together.
 
-To copy it to Windows, use MobaXterm's SFTP file browser, normally shown beside
-the SSH terminal. Open `/home/admin/babak/fall_detection/recordings`, select the
-newest `motion_...` folder and download it to the chosen Windows test folder.
+## What is saved in a log?
+
+The logger uses compact, headerless binary files rather than text. Every run has
+one `session.json` file and, for each detected logical source, a data file plus a
+matching timestamp file.
+
+Examples are:
+
+```text
+mpu_accel.bin
+mpu_accel_time.bin
+adxl355_accel.bin
+adxl355_accel_time.bin
+session.json
+```
+
+The format is:
+
+| File | Contents of each row |
+|---|---|
+| MPU-6050 and LSM6DSO data | X, Y, Z as three little-endian signed `int16` values |
+| SCL3300 data | X, Y, Z as three little-endian signed `int16` values |
+| ADXL355 data | X, Y, Z as three little-endian signed `int32` values containing its sign-extended 20-bit readings |
+| Every `_time.bin` file | One little-endian signed `int64` timestamp per data row |
+
+Each timestamp is the number of nanoseconds from the common start of the program.
+The data file and its matching timestamp file have the same number of rows. Values
+are raw sensor counts; `session.json` records the units, channel order, scale
+factors, delivered rates, sample counts, filenames and errors needed to convert
+them. Keep every file in the session folder together.
+
+With the default `log_scope = displayed`, a detected source that was never placed
+in a row can have an empty file. Selecting one source in two rows does not duplicate
+its logged samples. The detailed README contains a MATLAB loading example.
+
+To copy a recording to Windows, open Windows PowerShell in the destination folder.
+While connected to the Safety Node hotspot, use the folder name printed when the
+program stopped:
+
+```powershell
+scp -r admin@10.42.0.1:/home/admin/babak/fall_detection/recordings/motion_YYYYMMDD_HHMMSS .
+```
+
+Replace `motion_YYYYMMDD_HHMMSS` with the actual session folder. For Plan B,
+replace `10.42.0.1` with the address found by the network-scanning tool.
 
 ## Plan B — Use the USB Wi-Fi dongle
 
@@ -221,9 +321,9 @@ Wi-Fi password: codynick
 4. Scan the local network and look for hostname `Sohaware`, a Raspberry Pi device,
    or a newly appearing device. Record its IPv4 address, for example
    `192.168.1.57`. The actual address depends on the router and may change.
-5. In MobaXterm, create the same SSH session described in Part 2, but enter the
+5. Open Windows Remote Desktop Connection as described in Part 2, but enter the
    discovered address instead of `10.42.0.1`.
-6. Log in as `admin`, verify `echo $DISPLAY`, and continue from Part 3.
+6. Log in as `admin`, open a terminal in Raspberry Pi OS, and continue from Part 3.
 
 Do not run `nmcli device disconnect wlan1`; that command deliberately disconnects
 the USB Wi-Fi adapter.
@@ -238,7 +338,7 @@ the USB Wi-Fi adapter.
    5 GHz, which generally has less range through walls than 2.4 GHz.
 4. Try Plan B.
 
-### Windows connects but MobaXterm cannot reach `10.42.0.1`
+### Windows connects but Remote Desktop cannot reach `10.42.0.1`
 
 1. Confirm Windows is still connected to `Safetynodes`, even if it reports no
    internet access.
@@ -252,13 +352,12 @@ the USB Wi-Fi adapter.
    using password `safetynodes`, and try again.
 4. If it still fails, use Plan B.
 
-### The terminal works but the graph does not appear
+### Remote Desktop works but the graph does not appear
 
-1. Stop the program with `Ctrl+C`.
-2. Run `echo $DISPLAY` in MobaXterm.
-3. If the result is empty, enable MobaXterm's X server and X11-forwarding, then
-   reconnect the SSH session.
-4. Start the no-log command again.
+1. Confirm that the command was entered in a terminal opened **inside the Raspberry
+   Pi OS desktop**, not in Windows Command Prompt or PowerShell.
+2. Look at the Raspberry Pi terminal for an error message.
+3. Stop a stalled run with `Ctrl+C`, then start the no-log command again.
 
 ### A sensor is missing
 
